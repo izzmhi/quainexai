@@ -1,0 +1,14 @@
+# Normalise line endings in the repository to LF.
+# Quainex targets Windows first but macOS and Linux later; storing LF keeps
+# diffs clean across platforms while Git still checks out CRLF on Windows
+# where the platform expects it.
+* text=auto eol=lf
+
+# Binary assets must never be transformed.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.wav binary
+*.mp3 binary
