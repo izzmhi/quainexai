@@ -44,6 +44,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from quainex.api.middleware import new_correlation_id
+from quainex.core.exceptions import QuainexError
 from quainex.core.logging import get_logger
 
 router = APIRouter(tags=["realtime"])
@@ -154,6 +155,38 @@ def _handle_frame(raw: str) -> dict[str, Any]:
             return {"type": "error", "error": "unknown_frame_type", "received": unknown}
 
 
+def _authenticate(websocket: WebSocket) -> bool:
+    """Authenticate a socket before accepting it.
+
+    Browsers cannot set an ``Authorization`` header on a WebSocket, so the token
+    is taken from the query string, with the header still honoured for native
+    clients that can send one. A query-string token does leak into access logs,
+    which is why these tokens are short-lived.
+
+    Args:
+        websocket: The incoming socket, not yet accepted.
+
+    Returns:
+        Whether the caller may connect.
+    """
+    container = getattr(websocket.app.state, "container", None)
+    if container is None or not container.settings.auth_required:
+        return True
+    if container.tokens is None:
+        return False
+
+    header = websocket.headers.get("Authorization", "")
+    scheme, _, header_token = header.partition(" ")
+    token = header_token.strip() if scheme.lower() == "bearer" else ""
+    token = token or websocket.query_params.get("token", "")
+
+    try:
+        container.tokens.verify(token)
+    except QuainexError:
+        return False
+    return True
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     """Serve a WebSocket connection for the lifetime of the client.
@@ -161,6 +194,13 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     Args:
         websocket: The incoming socket.
     """
+    if not _authenticate(websocket):
+        # Closed before `accept()`, so an unauthenticated client never reaches
+        # the message loop. 1008 is the policy-violation close code.
+        _log.warning("ws_rejected", reason="authentication_failed")
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+
     connection_id = await manager.connect(websocket)
     try:
         await websocket.send_json({"type": "welcome", "connection_id": connection_id})

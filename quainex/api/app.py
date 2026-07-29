@@ -37,11 +37,12 @@ import time
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from quainex.api.errors import install_error_handlers
 from quainex.api.middleware import CorrelationIdMiddleware
-from quainex.api.routes import brain, commands, health, memory, voice, ws
+from quainex.api.routes import auth, brain, commands, health, memory, voice, ws
+from quainex.auth import require_auth
 from quainex.config.settings import Settings, get_settings
 from quainex.core.container import Container
 
@@ -113,11 +114,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(CorrelationIdMiddleware)
     install_error_handlers(app)
 
+    # /health and /auth are reachable without a token — a supervisor must be able
+    # to check liveness, and the login route is how you obtain a token in the
+    # first place. Everything else is guarded by attaching the dependency to the
+    # router, so a route added later inherits the protection rather than relying
+    # on someone remembering to list it.
     app.include_router(health.router)
-    app.include_router(brain.router)
-    app.include_router(commands.router)
-    app.include_router(voice.router)
-    app.include_router(memory.router)
+    app.include_router(auth.router)
+
+    protected = Depends(require_auth)
+    app.include_router(brain.router, dependencies=[protected])
+    app.include_router(commands.router, dependencies=[protected])
+    app.include_router(voice.router, dependencies=[protected])
+    app.include_router(memory.router, dependencies=[protected])
+
+    # The WebSocket authenticates in its own handshake: HTTP dependencies do not
+    # apply to a socket upgrade, and browsers cannot set headers on one.
     app.include_router(ws.router)
 
     return app

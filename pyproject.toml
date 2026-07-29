@@ -85,7 +85,11 @@ ignore = [
 # Tests document themselves through their names, and fixtures like `tmp_path`
 # carry well-known types. Enforcing docstrings and annotations here adds noise
 # without adding safety — production code keeps the full rule set.
-"tests/*" = ["S101", "D1", "ANN"]
+# S105/S106 flag string literals that look like credentials; in tests they are
+# deliberately fake fixtures, and several exist precisely to prove a bad
+# credential is rejected. SLF001 covers reaching into internals to build an
+# already-expired token.
+"tests/*" = ["S101", "S105", "S106", "SLF001", "D1", "ANN"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

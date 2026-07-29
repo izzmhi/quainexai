@@ -14,7 +14,7 @@ The three endpoints and why there are three:
     ``POST /commands/ask``     the convenience path: classify then execute in one
                               call. Still cannot bypass confirmation — an intent
                               needing approval comes back unexecuted with the
-                              question to ask.
+                              question to ask and a token to answer it with.
 
     Splitting them means the "one call does everything" path exists for
     convenience without becoming the only path. A voice loop wanting to confirm
@@ -30,8 +30,7 @@ Dependencies:
 
 Future improvements:
     * Stream results over the WebSocket so long actions report progress.
-    * Signed confirmation tokens, so "confirmed" cannot be asserted by a caller
-      that never showed the user anything (Phase 6).
+    * Per-command rate limits, so Phase 10's autonomous loop cannot spin.
 """
 
 from __future__ import annotations
@@ -52,12 +51,18 @@ class ExecuteRequest(BaseModel):
 
     Attributes:
         intent: A previously classified intent, typically from ``/brain/interpret``.
-        confirmed: Whether the user has explicitly approved this action. Only
-            consulted when the intent is flagged as needing confirmation.
+        confirmation_token: The token handed back with a ``requires_confirmation``
+            refusal. Present it to execute the action it was issued for.
+
+            Note there is no ``confirmed: true`` flag here any more. A boolean a
+            caller sets itself proves nothing — it is the caller asserting the
+            user agreed, which is exactly what a remote client cannot be trusted
+            to do. The token is signed and bound to one action, so it can only
+            have come from a refusal Quainex itself produced.
     """
 
     intent: Intent
-    confirmed: bool = False
+    confirmation_token: str | None = None
 
 
 class AskRequest(BaseModel):
@@ -66,13 +71,10 @@ class AskRequest(BaseModel):
     Attributes:
         utterance: What the user said or typed.
         history: Optional prior turns for resolving references.
-        confirmed: Blanket approval for this utterance. Use with care — it
-            pre-approves whatever the utterance turns out to mean.
     """
 
     utterance: str = Field(min_length=1, examples=["Open VS Code"])
     history: list[ChatMessage] = Field(default_factory=list)
-    confirmed: bool = False
 
 
 class AskResponse(BaseModel):
@@ -111,15 +113,19 @@ async def execute(request: ExecuteRequest, container: ContainerDep) -> CommandRe
 
     A refusal is a 200 with ``executed: false`` and an explanatory message, not
     an error — the caller asked a legitimate question and got a definite answer.
+    When the refusal is ``requires_confirmation`` it carries a
+    ``confirmation_token``; send the same request back with that token to proceed.
 
     Args:
-        request: The intent to execute and whether it has been confirmed.
+        request: The intent to execute and any confirmation token.
         container: Injected application container.
 
     Returns:
         The outcome, including whether any side effect occurred.
     """
-    return container.commands.execute(request.intent, confirmed=request.confirmed)
+    # `confirmed` is never set from an HTTP request: that flag is for in-process
+    # callers that genuinely asked the user, such as the voice loop.
+    return container.commands.execute(request.intent, confirmation_token=request.confirmation_token)
 
 
 @router.post(
@@ -135,8 +141,14 @@ async def execute(request: ExecuteRequest, container: ContainerDep) -> CommandRe
 async def ask(request: AskRequest, container: ContainerDep) -> AskResponse:
     """Classify an utterance and act on it in one call.
 
+    There is deliberately no blanket-approval flag. Pre-approving whatever an
+    utterance *turns out* to mean approves a classification that has not happened
+    yet — the one case where "are you sure?" carries the most information. An
+    action needing confirmation comes back unexecuted with a token; send it to
+    ``/commands/execute`` once the user has actually answered.
+
     Args:
-        request: The utterance, optional history, and blanket approval flag.
+        request: The utterance and optional history.
         container: Injected application container.
 
     Returns:
@@ -146,5 +158,5 @@ async def ask(request: AskRequest, container: ContainerDep) -> AskResponse:
         utterance=request.utterance,
         history=request.history,
     )
-    result = container.commands.execute(intent, confirmed=request.confirmed)
+    result = container.commands.execute(intent)
     return AskResponse(intent=intent, result=result)

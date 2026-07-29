@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from quainex.config.settings import Settings
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent
+    from quainex.security.confirmations import ConfirmationService
 
 _log = get_logger(__name__)
 
@@ -103,6 +104,7 @@ class CommandExecutor:
         registry: CommandRegistry,
         desktop: DesktopController,
         settings: Settings,
+        confirmations: ConfirmationService | None = None,
     ) -> None:
         """Construct the executor.
 
@@ -110,23 +112,44 @@ class CommandExecutor:
             registry: Commands available for dispatch.
             desktop: The controller commands act through.
             settings: Configuration supplying the destructive-action switch.
+            confirmations: Issues and verifies confirmation tokens. When absent,
+                only the in-process ``confirmed`` flag can satisfy the gate.
         """
         self._registry = registry
         self._desktop = desktop
         self._settings = settings
+        self._confirmations = confirmations
 
     @property
     def catalogue(self) -> dict[str, str]:
         """Every executable intent and its summary."""
         return self._registry.catalogue()
 
-    def execute(self, intent: Intent, *, confirmed: bool = False) -> CommandResult:
+    def execute(
+        self,
+        intent: Intent,
+        *,
+        confirmed: bool = False,
+        confirmation_token: str | None = None,
+    ) -> CommandResult:
         """Run the command for an intent, subject to policy.
+
+        Confirmation can be satisfied two ways, and the distinction is the whole
+        point of Phase 6:
+
+        * ``confirmed=True`` — an **in-process** caller vouching that the user
+          was asked. The voice loop uses this: it spoke the prompt aloud and
+          heard the answer. Never set from an HTTP request.
+        * ``confirmation_token`` — a **remote** caller presenting the token that
+          was handed back with the refusal. Signed and bound to this exact
+          action, so it cannot be forged, reused, or redirected at a different
+          command.
 
         Args:
             intent: The classified intent to act on.
-            confirmed: Whether the user has explicitly approved this action.
-                Only meaningful when ``intent.requires_confirmation`` is set.
+            confirmed: In-process approval. Only meaningful when
+                ``intent.requires_confirmation`` is set.
+            confirmation_token: A token previously issued for this exact action.
 
         Returns:
             The outcome, including whether any side effect occurred.
@@ -140,11 +163,14 @@ class CommandExecutor:
                 f"'{intent.intent.value}' is not something Quainex can execute.",
             )
 
-        if intent.requires_confirmation and not confirmed:
+        if intent.requires_confirmation and not self._is_confirmed(
+            intent, confirmed, confirmation_token
+        ):
             return self._refuse(
                 intent,
                 CommandStatus.REQUIRES_CONFIRMATION,
                 self._confirmation_prompt(intent),
+                token=self._issue_token(intent),
             )
 
         if command.destructive and not self._settings.allow_destructive_commands:
@@ -225,6 +251,36 @@ class CommandExecutor:
             data=outcome.data,
         )
 
+    def _is_confirmed(
+        self, intent: Intent, confirmed: bool, confirmation_token: str | None
+    ) -> bool:
+        """Decide whether this action has genuinely been approved.
+
+        Args:
+            intent: The action being attempted.
+            confirmed: In-process approval from a trusted caller.
+            confirmation_token: A token issued for this exact action.
+
+        Returns:
+            Whether the confirmation gate is satisfied.
+        """
+        if confirmed:
+            return True
+        if confirmation_token and self._confirmations is not None:
+            return self._confirmations.verify(confirmation_token, intent)
+        return False
+
+    def _issue_token(self, intent: Intent) -> str | None:
+        """Mint a confirmation token to accompany a refusal.
+
+        Args:
+            intent: The action awaiting confirmation.
+
+        Returns:
+            A token, or ``None`` when token confirmation is not configured.
+        """
+        return self._confirmations.issue(intent) if self._confirmations else None
+
     @staticmethod
     def _confirmation_prompt(intent: Intent) -> str:
         """Phrase the question the user must answer before this action runs.
@@ -241,13 +297,20 @@ class CommandExecutor:
         return f"Confirm: {action}?"
 
     @staticmethod
-    def _refuse(intent: Intent, status: CommandStatus, message: str) -> CommandResult:
+    def _refuse(
+        intent: Intent,
+        status: CommandStatus,
+        message: str,
+        token: str | None = None,
+    ) -> CommandResult:
         """Record a refusal that occurred before any side effect.
 
         Args:
             intent: The intent that was refused.
             status: The refusal status.
             message: Explanation for the caller.
+            token: Confirmation token to hand back, when the refusal is one the
+                caller can resolve by confirming.
 
         Returns:
             A result with ``executed=False``.
@@ -263,15 +326,21 @@ class CommandExecutor:
             intent=intent.intent.value,
             message=message,
             executed=False,
+            confirmation_token=token,
         )
 
 
-def build_executor(desktop: DesktopController, settings: Settings) -> CommandExecutor:
+def build_executor(
+    desktop: DesktopController,
+    settings: Settings,
+    confirmations: ConfirmationService | None = None,
+) -> CommandExecutor:
     """Assemble a registry of built-in commands and an executor over it.
 
     Args:
         desktop: The controller commands act through.
         settings: Application configuration.
+        confirmations: Optional confirmation-token service.
 
     Returns:
         A ready-to-use executor.
@@ -280,4 +349,5 @@ def build_executor(desktop: DesktopController, settings: Settings) -> CommandExe
         registry=CommandRegistry(build_commands(settings)),
         desktop=desktop,
         settings=settings,
+        confirmations=confirmations,
     )

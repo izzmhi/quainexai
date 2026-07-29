@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from functools import lru_cache
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Self
 
@@ -140,6 +141,27 @@ class Settings(BaseSettings):
     # Where screenshots are written.
     screenshot_dir: Path = Field(default_factory=lambda: Path.home() / "Pictures" / "Quainex")
 
+    # --- Remote access and auth (Phase 6) ---------------------------------
+    # Signing secret for access tokens. Required whenever authentication is
+    # required. Generate with:
+    #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+    auth_secret: SecretStr | None = None
+    # scrypt hash of the remote-access password. Generate with:
+    #   python scripts/hash_password.py
+    auth_password_hash: str | None = None
+    auth_token_ttl_minutes: int = Field(default=60, ge=1, le=10080)
+
+    # Force authentication on even when bound to loopback. Leave unset to let it
+    # be derived from the bind address — see `auth_required` below.
+    require_auth: bool | None = None
+
+    # Requests per minute per client before throttling. Applies only when
+    # authentication is required; localhost is not rate limited.
+    rate_limit_per_minute: int = Field(default=120, ge=1, le=10000)
+
+    # How long a confirmation token stays redeemable.
+    confirmation_ttl_seconds: int = Field(default=120, ge=10, le=3600)
+
     # --- Memory (Phase 5) -------------------------------------------------
     # Where the SQLite file lives. Relative paths resolve to the repo root.
     database_path: Path = Path("quainex.db")
@@ -240,6 +262,72 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """Whether the process is running in the production environment."""
         return self.environment is Environment.PROD
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def is_loopback(self) -> bool:
+        """Whether the server is bound to this machine only.
+
+        Returns:
+            ``True`` when the bind address is a loopback address.
+        """
+        try:
+            return ip_address(self.host).is_loopback
+        except ValueError:
+            # Not an IP literal — "localhost" is loopback, a hostname is not.
+            return self.host.strip().lower() in {"localhost", "localhost.localdomain"}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def auth_required(self) -> bool:
+        """Whether callers must authenticate.
+
+        **Derived from the bind address rather than configured**, unless
+        explicitly overridden. This is the point: a separate `enable_auth` flag
+        makes "exposed to the network with authentication off" a reachable
+        configuration, and that configuration is exactly the disaster. Here it is
+        unreachable — binding to anything other than loopback turns authentication
+        on, and startup refuses to proceed without credentials.
+
+        Returns:
+            Whether authentication is enforced.
+        """
+        if self.require_auth is not None:
+            return self.require_auth
+        return not self.is_loopback
+
+    @model_validator(mode="after")
+    def _require_credentials_when_exposed(self) -> Self:
+        """Refuse to start exposed without credentials configured.
+
+        Failing at startup is the whole point. The alternative — booting anyway
+        and logging a warning — means the window between "listening on the
+        network" and "someone notices the warning" is a window with no front
+        door on the machine.
+
+        Raises:
+            ValueError: Authentication is required but not configured.
+        """
+        if not self.auth_required:
+            return self
+
+        missing = [
+            name
+            for name, value in (
+                ("QUAINEX_AUTH_SECRET", self.auth_secret),
+                ("QUAINEX_AUTH_PASSWORD_HASH", self.auth_password_hash),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"Authentication is required (host={self.host!r} is not loopback, or "
+                f"QUAINEX_REQUIRE_AUTH is set), but {' and '.join(missing)} "
+                f"{'is' if len(missing) == 1 else 'are'} not configured. "
+                "Run `python scripts/hash_password.py` to set this up, or bind to "
+                "127.0.0.1 to run locally without authentication."
+            )
+        return self
 
     @property
     def resolved_search_roots(self) -> tuple[Path, ...]:

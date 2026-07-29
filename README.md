@@ -239,9 +239,18 @@ fix.
 - `.env` is gitignored. The API key is held as a `SecretStr`, so it does not
   appear in logs, reprs, or tracebacks. The log pipeline additionally redacts any
   field whose key looks credential-shaped.
-- **The default bind address is `127.0.0.1` and must stay that way until Phase 6
-  adds authentication.** The WebSocket endpoint is currently unauthenticated;
-  binding to `0.0.0.0` would expose it to the whole network.
+- **You cannot expose Quainex without a password.** Authentication is *derived*
+  from the bind address rather than configured separately, so "reachable from the
+  network with auth off" is not a configuration that exists — binding to anything
+  other than loopback turns auth on, and startup fails without credentials.
+  Run `python scripts/hash_password.py` to set them up.
+- **Confirmation must be proved, not asserted.** An action needing approval comes
+  back with a signed, single-use token bound to that exact action. A client
+  cannot mint one, and a token issued for "close Spotify" will not shut the
+  machine down.
+- **No TLS yet.** Tokens cross the LAN in the clear — put a reverse proxy with a
+  certificate in front before this leaves a trusted network, and do not
+  port-forward it to the internet as it stands.
 - Error responses never contain tracebacks or internal paths. Each carries a
   correlation ID that ties it to the full record in `logs/quainex.log`.
 - Interactive API docs are disabled when `QUAINEX_ENVIRONMENT=prod`.
@@ -257,8 +266,8 @@ fix.
 | 3 | Desktop automation | **Complete** |
 | 4 | Voice assistant | **Complete** |
 | 5 | Memory engine | **Complete** |
-| 6 | Phone remote control | Next |
-| 7 | Developer assistant | Planned |
+| 6 | Remote access and auth | **Complete** |
+| 7 | Developer assistant | Next |
 | 8 | Vision | Planned |
 | 9 | Plugin marketplace | Planned |
 | 10 | Autonomous agent | Planned |

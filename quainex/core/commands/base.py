@@ -66,6 +66,10 @@ class CommandResult(BaseModel):
         executed: Whether any side effect occurred. Explicit rather than derived,
             so an auditor never has to infer it from the status.
         data: Optional structured payload (search hits, system metrics).
+        confirmation_token: Present only on ``REQUIRES_CONFIRMATION``. Bound to
+            this exact action; present it back to execute the command. A caller
+            cannot mint one, which is what stops a remote client from simply
+            declaring that the user agreed.
     """
 
     status: CommandStatus
@@ -73,6 +77,7 @@ class CommandResult(BaseModel):
     message: str
     executed: bool
     data: dict[str, object] | None = None
+    confirmation_token: str | None = None
 
     @property
     def ok(self) -> bool:

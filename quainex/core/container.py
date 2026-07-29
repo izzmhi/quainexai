@@ -41,9 +41,11 @@ Future improvements:
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from quainex.auth import TokenService
 from quainex.config.settings import AIProviderName, Settings, get_settings
 from quainex.core.automation import WindowsDesktopController
 from quainex.core.brain import Brain
@@ -54,6 +56,7 @@ from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
 from quainex.core.speech import WindowsSapiTTS
 from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSession
 from quainex.database.engine import Database
+from quainex.security import ConfirmationService, RateLimiter
 from quainex.services.ai.anthropic_provider import AnthropicProvider
 
 if TYPE_CHECKING:
@@ -77,6 +80,10 @@ class Container:
         voice: Spoken conversation loop.
         database: Connection to the persistent store.
         memory: Short-term conversation context and long-term recall.
+        tokens: Issues and verifies access tokens. ``None`` when authentication
+            is not configured, which is only permitted on loopback.
+        confirmations: Issues and verifies command confirmation tokens.
+        rate_limiter: Per-client request throttle.
     """
 
     settings: Settings
@@ -88,6 +95,9 @@ class Container:
     voice: VoiceSession
     database: Database
     memory: MemoryManager
+    tokens: TokenService | None
+    confirmations: ConfirmationService
+    rate_limiter: RateLimiter
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -113,7 +123,28 @@ class Container:
         ai_provider = cls._build_ai_provider(resolved)
         brain = Brain(provider=ai_provider, settings=resolved)
         desktop = WindowsDesktopController(resolved)
-        commands = build_executor(desktop=desktop, settings=resolved)
+
+        # Confirmation tokens are signed with the auth secret when one is set,
+        # and with an ephemeral per-process secret otherwise. The ephemeral case
+        # is loopback-only, where the trust boundary is the machine itself; a
+        # restart simply invalidates any token in flight, which is harmless given
+        # their two-minute lifetime.
+        confirmation_secret = (
+            resolved.auth_secret.get_secret_value()
+            if resolved.auth_secret
+            else secrets.token_urlsafe(48)
+        )
+        confirmations = ConfirmationService(
+            confirmation_secret, ttl_seconds=resolved.confirmation_ttl_seconds
+        )
+        commands = build_executor(desktop=desktop, settings=resolved, confirmations=confirmations)
+
+        tokens = (
+            TokenService(resolved.auth_secret.get_secret_value(), resolved.auth_token_ttl_minutes)
+            if resolved.auth_secret
+            else None
+        )
+        rate_limiter = RateLimiter(resolved.rate_limit_per_minute)
 
         # The engine is created here but the schema is not: DDL is async, so it
         # happens in `start()` during the application lifespan.
@@ -141,6 +172,8 @@ class Container:
             commands_registered=len(commands.catalogue),
             destructive_commands_enabled=resolved.allow_destructive_commands,
             voice_available=voice.is_available,
+            auth_required=resolved.auth_required,
+            bound_to_loopback=resolved.is_loopback,
         )
         return cls(
             settings=resolved,
@@ -152,6 +185,9 @@ class Container:
             voice=voice,
             database=database,
             memory=memory,
+            tokens=tokens,
+            confirmations=confirmations,
+            rate_limiter=rate_limiter,
         )
 
     async def start(self) -> None:

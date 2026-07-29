@@ -102,6 +102,25 @@ class CommandNotAllowedError(QuainexError):
     http_status = HTTPStatus.FORBIDDEN
 
 
+class AuthenticationError(QuainexError):
+    """The caller did not prove who they are.
+
+    Deliberately vague in its message: distinguishing "no such user" from "wrong
+    password" from "expired token" tells an attacker which half of a guess was
+    right.
+    """
+
+    error_code = "authentication_failed"
+    http_status = HTTPStatus.UNAUTHORIZED
+
+
+class RateLimitedError(QuainexError):
+    """The caller is making requests faster than the configured limit."""
+
+    error_code = "rate_limited"
+    http_status = HTTPStatus.TOO_MANY_REQUESTS
+
+
 class SpeechError(QuainexError):
     """Speech recognition or synthesis failed."""
 
