@@ -41,7 +41,7 @@ from fastapi import FastAPI
 
 from quainex.api.errors import install_error_handlers
 from quainex.api.middleware import CorrelationIdMiddleware
-from quainex.api.routes import health, ws
+from quainex.api.routes import brain, health, ws
 from quainex.config.settings import Settings, get_settings
 from quainex.core.container import Container
 
@@ -113,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_error_handlers(app)
 
     app.include_router(health.router)
+    app.include_router(brain.router)
     app.include_router(ws.router)
 
     return app

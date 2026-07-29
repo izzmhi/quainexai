@@ -1,0 +1,285 @@
+"""Tests for the Brain: classification, confirmation policy, and the endpoint.
+
+Every test runs against a fake provider, so the suite exercises Quainex's own
+logic — validation, policy, history handling — without network access, cost, or
+dependence on what a real model happens to answer on a given day.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+from pydantic import BaseModel
+
+from quainex.config.settings import Settings
+from quainex.core.brain import Brain, IntentClassification, IntentParameter, IntentType
+from quainex.core.brain.brain import MAX_HISTORY_TURNS, MAX_UTTERANCE_CHARS
+from quainex.core.exceptions import InvalidUtteranceError, ProviderError
+from quainex.services.ai.provider import AIProvider, ChatMessage
+
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
+
+
+class FakeProvider:
+    """An ``AIProvider`` that returns a canned classification and records inputs."""
+
+    def __init__(
+        self,
+        classification: IntentClassification | None = None,
+        error: Exception | None = None,
+        available: bool = True,
+    ) -> None:
+        self._classification = classification
+        self._error = error
+        self._available = available
+        self.calls = 0
+        self.last_messages: list[ChatMessage] = []
+        self.last_system: str | None = None
+
+    @property
+    def name(self) -> str:
+        return "fake"
+
+    @property
+    def is_available(self) -> bool:
+        return self._available
+
+    async def complete(
+        self,
+        *,
+        messages: list[ChatMessage],
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        return "unused"
+
+    async def parse(
+        self,
+        *,
+        messages: list[ChatMessage],
+        output_model: type[BaseModel],
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> BaseModel:
+        self.calls += 1
+        self.last_messages = messages
+        self.last_system = system
+        if self._error is not None:
+            raise self._error
+        assert self._classification is not None
+        return self._classification
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _classification(
+    intent: IntentType = IntentType.OPEN_APPLICATION,
+    target: str | None = "VS Code",
+    confidence: float = 0.99,
+    parameters: list[IntentParameter] | None = None,
+) -> IntentClassification:
+    return IntentClassification(
+        intent=intent,
+        target=target,
+        confidence=confidence,
+        reasoning="test fixture",
+        parameters=parameters or [],
+    )
+
+
+def _brain(provider: FakeProvider, tmp_path, threshold: float = 0.6) -> Brain:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        log_dir=tmp_path / "logs",
+        brain_confidence_threshold=threshold,
+    )
+    return Brain(provider=provider, settings=settings)
+
+
+# -- protocol conformance --------------------------------------------------
+
+
+def test_fake_provider_satisfies_the_protocol():
+    provider: AIProvider = FakeProvider()
+    assert provider.name == "fake"
+
+
+# -- happy path ------------------------------------------------------------
+
+
+async def test_clear_command_is_classified_and_needs_no_confirmation(tmp_path):
+    provider = FakeProvider(_classification())
+    intent = await _brain(provider, tmp_path).interpret("Open VS Code")
+
+    assert intent.intent is IntentType.OPEN_APPLICATION
+    assert intent.target == "VS Code"
+    assert intent.confidence == pytest.approx(0.99)
+    assert intent.requires_confirmation is False
+    assert intent.is_actionable is True
+
+
+async def test_system_prompt_and_utterance_are_sent(tmp_path):
+    provider = FakeProvider(_classification())
+    await _brain(provider, tmp_path).interpret("  Open VS Code  ")
+
+    assert provider.last_system is not None
+    assert "Intent catalogue" in provider.last_system
+    # The utterance is trimmed before it is sent.
+    assert provider.last_messages[-1].content == "Open VS Code"
+    assert provider.last_messages[-1].role == "user"
+
+
+async def test_parameters_round_trip_to_a_dict(tmp_path):
+    provider = FakeProvider(
+        _classification(
+            intent=IntentType.CLIPBOARD,
+            target=None,
+            parameters=[
+                IntentParameter(key="action", value="write"),
+                IntentParameter(key="text", value="hello"),
+            ],
+        )
+    )
+    intent = await _brain(provider, tmp_path).interpret("Copy hello to my clipboard")
+    assert intent.parameters_as_dict() == {"action": "write", "text": "hello"}
+
+
+# -- confirmation policy ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "intent_type",
+    [IntentType.SHUTDOWN, IntentType.RESTART, IntentType.SLEEP, IntentType.CLOSE_APPLICATION],
+)
+async def test_disruptive_intents_always_require_confirmation(intent_type, tmp_path):
+    # Even at maximum confidence: the policy is not the model's to decide.
+    provider = FakeProvider(_classification(intent=intent_type, target=None, confidence=1.0))
+    intent = await _brain(provider, tmp_path).interpret("do the thing")
+    assert intent.requires_confirmation is True
+
+
+async def test_low_confidence_requires_confirmation(tmp_path):
+    provider = FakeProvider(_classification(confidence=0.3))
+    intent = await _brain(provider, tmp_path).interpret("uh, open the code thing")
+
+    assert intent.requires_confirmation is True
+    # The best guess is preserved rather than discarded — one "yes" resolves it.
+    assert intent.intent is IntentType.OPEN_APPLICATION
+    assert intent.target == "VS Code"
+
+
+async def test_confidence_threshold_is_configurable(tmp_path):
+    classification = _classification(confidence=0.5)
+
+    strict = await _brain(FakeProvider(classification), tmp_path, threshold=0.9).interpret("go")
+    lenient = await _brain(FakeProvider(classification), tmp_path, threshold=0.1).interpret("go")
+
+    assert strict.requires_confirmation is True
+    assert lenient.requires_confirmation is False
+
+
+async def test_conversational_intents_are_not_actionable(tmp_path):
+    provider = FakeProvider(
+        _classification(intent=IntentType.ANSWER_QUESTION, target="what is 2+2", confidence=0.95)
+    )
+    intent = await _brain(provider, tmp_path).interpret("what is 2+2")
+    assert intent.is_actionable is False
+
+
+# -- input validation ------------------------------------------------------
+
+
+@pytest.mark.parametrize("utterance", ["", "   ", "\n\t "])
+async def test_empty_utterance_is_rejected_without_calling_the_model(utterance, tmp_path):
+    provider = FakeProvider(_classification())
+    with pytest.raises(InvalidUtteranceError):
+        await _brain(provider, tmp_path).interpret(utterance)
+    assert provider.calls == 0, "must not pay for a model call to classify whitespace"
+
+
+async def test_oversized_utterance_is_rejected(tmp_path):
+    provider = FakeProvider(_classification())
+    with pytest.raises(InvalidUtteranceError, match="limit is"):
+        await _brain(provider, tmp_path).interpret("x" * (MAX_UTTERANCE_CHARS + 1))
+    assert provider.calls == 0
+
+
+async def test_history_is_truncated_to_the_configured_window(tmp_path):
+    provider = FakeProvider(_classification())
+    history = [ChatMessage(role="user", content=f"turn {i}") for i in range(20)]
+
+    await _brain(provider, tmp_path).interpret("close it", history=history)
+
+    # Truncated history plus the new utterance.
+    assert len(provider.last_messages) == MAX_HISTORY_TURNS + 1
+    assert provider.last_messages[0].content == f"turn {20 - MAX_HISTORY_TURNS}"
+    assert provider.last_messages[-1].content == "close it"
+
+
+# -- failure propagation ---------------------------------------------------
+
+
+async def test_provider_errors_propagate(tmp_path):
+    provider = FakeProvider(error=ProviderError("upstream exploded"))
+    with pytest.raises(ProviderError, match="upstream exploded"):
+        await _brain(provider, tmp_path).interpret("Open VS Code")
+
+
+# -- HTTP endpoint ---------------------------------------------------------
+
+
+def _install_fake_brain(client: TestClient, provider: FakeProvider) -> None:
+    container = client.app.state.container
+    container.brain = Brain(provider=provider, settings=container.settings)
+
+
+def test_interpret_endpoint_returns_the_intent(client: TestClient):
+    _install_fake_brain(client, FakeProvider(_classification()))
+
+    response = client.post("/brain/interpret", json={"utterance": "Open VS Code"})
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body["intent"] == "open_application"
+    assert body["target"] == "VS Code"
+    assert body["requires_confirmation"] is False
+    assert body["reasoning"]
+
+
+def test_interpret_endpoint_flags_dangerous_intents(client: TestClient):
+    _install_fake_brain(
+        client,
+        FakeProvider(_classification(intent=IntentType.SHUTDOWN, target=None, confidence=1.0)),
+    )
+    body = client.post("/brain/interpret", json={"utterance": "shut down"}).json()
+    assert body["requires_confirmation"] is True
+
+
+def test_whitespace_utterance_returns_400_envelope(client: TestClient):
+    _install_fake_brain(client, FakeProvider(_classification()))
+
+    response = client.post("/brain/interpret", json={"utterance": "   "})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_utterance"
+
+
+def test_malformed_body_uses_the_same_envelope(client: TestClient):
+    # FastAPI's default 422 shape would be the one response clients need a
+    # second parser for; it is normalised into the standard envelope.
+    response = client.post("/brain/interpret", json={"wrong_field": "x"})
+    assert response.status_code == 422
+
+    error = response.json()["error"]
+    assert error["code"] == "validation_error"
+    assert error["correlation_id"]
+    assert error["fields"], "per-field detail is preserved for the caller"
+
+
+def test_interpret_without_credentials_returns_503(client: TestClient):
+    # The default test container has no API key, so the real provider is used.
+    response = client.post("/brain/interpret", json={"utterance": "Open VS Code"})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "provider_not_configured"

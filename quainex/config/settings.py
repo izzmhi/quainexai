@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     # responses truncate mid-thought.
     ai_max_tokens: int = Field(default=8192, ge=1)
 
+    # --- Brain -----------------------------------------------------------
+    # Classifications below this confidence still return their best guess, but
+    # are flagged as needing user confirmation before Phase 3 acts on them.
+    brain_confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+
     @model_validator(mode="after")
     def _enforce_production_invariants(self) -> Self:
         """Force debug off in production.

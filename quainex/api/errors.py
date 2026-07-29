@@ -33,6 +33,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -154,6 +155,33 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
     )
 
 
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Normalise request-validation failures into the standard envelope.
+
+    FastAPI's default returns a bare ``{"detail": [...]}`` body, which would be
+    the one response shape in the API that clients need a second parser for.
+    The per-field detail is preserved under ``fields`` because it is genuinely
+    useful to a caller and contains only their own input.
+
+    Args:
+        request: The request being handled.
+        exc: The raised ``RequestValidationError``.
+
+    Returns:
+        A 422 JSON response carrying the error envelope.
+    """
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    body = _envelope(
+        code="validation_error",
+        message="The request body failed validation.",
+        correlation_id=_correlation_id(request),
+    )
+    body["error"]["fields"] = [
+        {"location": list(err.get("loc", ())), "message": err.get("msg", "")} for err in errors
+    ]
+    return JSONResponse(status_code=HTTPStatus.UNPROCESSABLE_ENTITY, content=body)
+
+
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle anything not otherwise caught.
 
@@ -197,5 +225,6 @@ def install_error_handlers(app: FastAPI) -> None:
         app: The FastAPI application to configure.
     """
     app.add_exception_handler(QuainexError, quainex_error_handler)
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)

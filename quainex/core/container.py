@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from quainex.config.settings import AIProviderName, Settings, get_settings
+from quainex.core.brain import Brain
 from quainex.core.exceptions import ConfigurationError
 from quainex.core.logging import configure_logging, get_logger
 from quainex.services.ai.anthropic_provider import AnthropicProvider
@@ -63,11 +64,13 @@ class Container:
         settings: Validated configuration for this process.
         logger: Root application logger, pre-bound with app identity.
         ai_provider: The configured language model backend.
+        brain: Natural language to structured intent classifier.
     """
 
     settings: Settings
     logger: structlog.stdlib.BoundLogger
     ai_provider: AIProvider
+    brain: Brain
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -91,6 +94,7 @@ class Container:
         logger = get_logger("quainex", app=resolved.app_name, version=resolved.version)
 
         ai_provider = cls._build_ai_provider(resolved)
+        brain = Brain(provider=ai_provider, settings=resolved)
 
         logger.info(
             "container_initialised",
@@ -98,7 +102,12 @@ class Container:
             ai_provider=ai_provider.name,
             ai_available=ai_provider.is_available,
         )
-        return cls(settings=resolved, logger=logger, ai_provider=ai_provider)
+        return cls(
+            settings=resolved,
+            logger=logger,
+            ai_provider=ai_provider,
+            brain=brain,
+        )
 
     @staticmethod
     def _build_ai_provider(settings: Settings) -> AIProvider:

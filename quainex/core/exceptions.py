@@ -67,6 +67,18 @@ class ConfigurationError(QuainexError):
     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+class InvalidUtteranceError(QuainexError):
+    """The user's input cannot be interpreted as a request.
+
+    A client-side mistake (empty or oversized input), so it is rejected before a
+    request is sent upstream — there is no point paying for a model call to
+    classify whitespace.
+    """
+
+    error_code = "invalid_utterance"
+    http_status = HTTPStatus.BAD_REQUEST
+
+
 class ProviderError(QuainexError):
     """An upstream provider call failed.
 
