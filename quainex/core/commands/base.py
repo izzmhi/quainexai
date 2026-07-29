@@ -30,7 +30,7 @@ Future improvements:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -40,6 +40,9 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent, IntentType
+    from quainex.core.devtools.assistant import CodeAssistant
+    from quainex.core.devtools.runner import DevRunner
+    from quainex.vision.screen import ScreenAnalyst
 
 
 class CommandStatus(StrEnum):
@@ -85,9 +88,36 @@ class CommandResult(BaseModel):
         return self.status is CommandStatus.SUCCEEDED
 
 
-#: A command implementation: given the desktop and the intent, do the thing and
+@dataclass(frozen=True, slots=True)
+class CommandContext:
+    """Everything a command handler is allowed to reach.
+
+    Phases 1-6 needed only the desktop controller, so handlers took one. Phases 7
+    and 8 added commands that call a model or run a build tool, and passing three
+    more positional arguments to fifteen handlers — most of which need none of
+    them — would have been the wrong shape. A context object means a handler
+    reaches for what it needs and ignores the rest, and adding a collaborator in
+    Phase 9 does not touch a single existing handler.
+
+    Attributes:
+        desktop: OS-level actions.
+        dev: Development operations, when configured.
+        code: AI-backed code assistance, when configured.
+        vision: Screen and document understanding, when configured.
+    """
+
+    desktop: DesktopController
+    dev: DevRunner | None = None
+    code: CodeAssistant | None = None
+    vision: ScreenAnalyst | None = None
+
+
+#: A command implementation: given the context and the intent, do the thing and
 #: describe it. Raises ``CommandExecutionError`` / ``CommandNotAllowedError``.
-CommandHandler = Callable[["DesktopController", "Intent"], "CommandOutcome"]
+#:
+#: Async because half the commands now await a model or a subprocess. Making the
+#: sync handlers async too keeps one dispatch path rather than two.
+CommandHandler = Callable[["CommandContext", "Intent"], Awaitable["CommandOutcome"]]
 
 
 class CommandOutcome(BaseModel):

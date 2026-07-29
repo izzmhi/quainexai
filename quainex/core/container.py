@@ -50,6 +50,7 @@ from quainex.config.settings import AIProviderName, Settings, get_settings
 from quainex.core.automation import WindowsDesktopController
 from quainex.core.brain import Brain
 from quainex.core.commands import CommandExecutor, build_executor
+from quainex.core.devtools import CodeAssistant, DevRunner
 from quainex.core.exceptions import ConfigurationError
 from quainex.core.logging import configure_logging, get_logger
 from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
@@ -58,6 +59,7 @@ from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSessio
 from quainex.database.engine import Database
 from quainex.security import ConfirmationService, RateLimiter
 from quainex.services.ai.anthropic_provider import AnthropicProvider
+from quainex.vision import ScreenAnalyst
 
 if TYPE_CHECKING:
     import structlog
@@ -84,6 +86,9 @@ class Container:
             is not configured, which is only permitted on loopback.
         confirmations: Issues and verifies command confirmation tokens.
         rate_limiter: Per-client request throttle.
+        dev: Runs allowlisted development operations.
+        code: AI-backed code explanation, review and generation.
+        vision: Screen and document understanding.
     """
 
     settings: Settings
@@ -98,6 +103,9 @@ class Container:
     tokens: TokenService | None
     confirmations: ConfirmationService
     rate_limiter: RateLimiter
+    dev: DevRunner
+    code: CodeAssistant
+    vision: ScreenAnalyst
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -137,7 +145,17 @@ class Container:
         confirmations = ConfirmationService(
             confirmation_secret, ttl_seconds=resolved.confirmation_ttl_seconds
         )
-        commands = build_executor(desktop=desktop, settings=resolved, confirmations=confirmations)
+        dev = DevRunner(resolved)
+        code = CodeAssistant(ai_provider, resolved)
+        vision = ScreenAnalyst(ai_provider, desktop, resolved)
+        commands = build_executor(
+            desktop=desktop,
+            settings=resolved,
+            confirmations=confirmations,
+            dev=dev,
+            code=code,
+            vision=vision,
+        )
 
         tokens = (
             TokenService(resolved.auth_secret.get_secret_value(), resolved.auth_token_ttl_minutes)
@@ -188,6 +206,9 @@ class Container:
             tokens=tokens,
             confirmations=confirmations,
             rate_limiter=rate_limiter,
+            dev=dev,
+            code=code,
+            vision=vision,
         )
 
     async def start(self) -> None:

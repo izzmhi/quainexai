@@ -189,41 +189,41 @@ def _executor(tmp_path: Path, desktop: FakeDesktopController):
     return build_executor(desktop, settings, ConfirmationService(SECRET))
 
 
-def test_refusal_hands_back_a_usable_token(tmp_path):
+async def test_refusal_hands_back_a_usable_token(tmp_path):
     desktop = FakeDesktopController()
     executor = _executor(tmp_path, desktop)
     intent = _intent()
 
-    refused = executor.execute(intent)
+    refused = await executor.execute(intent)
     assert refused.status is CommandStatus.REQUIRES_CONFIRMATION
     assert refused.confirmation_token, "the caller needs a way to proceed"
     assert desktop.calls == []
 
-    allowed = executor.execute(intent, confirmation_token=refused.confirmation_token)
+    allowed = await executor.execute(intent, confirmation_token=refused.confirmation_token)
     assert allowed.status is CommandStatus.SUCCEEDED
     assert desktop.actions == ["shutdown"]
 
 
-def test_a_forged_token_does_not_execute(tmp_path):
+async def test_a_forged_token_does_not_execute(tmp_path):
     desktop = FakeDesktopController()
     executor = _executor(tmp_path, desktop)
 
-    result = executor.execute(_intent(), confirmation_token="obviously-made-up")
+    result = await executor.execute(_intent(), confirmation_token="obviously-made-up")
 
     assert result.status is CommandStatus.REQUIRES_CONFIRMATION
     assert desktop.calls == []
 
 
-def test_a_token_for_one_action_does_not_execute_another(tmp_path):
+async def test_a_token_for_one_action_does_not_execute_another(tmp_path):
     desktop = FakeDesktopController()
     executor = _executor(tmp_path, desktop)
 
-    close_token = executor.execute(
-        _intent(IntentType.CLOSE_APPLICATION, "Spotify")
+    close_token = (
+        await executor.execute(_intent(IntentType.CLOSE_APPLICATION, "Spotify"))
     ).confirmation_token
     assert close_token is not None
 
-    result = executor.execute(_intent(IntentType.SHUTDOWN), confirmation_token=close_token)
+    result = await executor.execute(_intent(IntentType.SHUTDOWN), confirmation_token=close_token)
 
     assert result.status is CommandStatus.REQUIRES_CONFIRMATION
     assert desktop.calls == [], "a close-Spotify approval must never power off the machine"

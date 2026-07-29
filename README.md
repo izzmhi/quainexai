@@ -7,7 +7,7 @@ understands natural language, automates workflows, controls the machine it runs
 on, and eventually manages a digital life — while staying privacy-conscious and
 under the user's control.
 
-> **Status: Phases 1–5 of 10 complete.**
+> **Status: Phases 1–8 of 10 complete.**
 > Quainex understands a spoken or typed request, classifies it into a typed
 > intent, executes it on this machine behind two independent safety gates,
 > answers out loud, and remembers the exchange. Remote control from a phone is
@@ -55,6 +55,13 @@ It also **remembers** — recent turns (so "close it" resolves), your preference
 facts you tell it, and an append-only record of everything it has done. All of it
 is listable and deletable through `/memory`, except the audit trail, which is
 deliberately read-only.
+
+**Developer tools** (Phase 7): `git.status`, `git.commit`, `tests.run`,
+`lint.run`, `types.check`, `docker.ps` and more — an allowlist of *complete
+commands*, never a shell. Plus explain, review and generate for source files.
+
+**Vision** (Phase 8): ask about what's on screen, or about a PDF. Window
+enumeration is local and free, so "is VS Code open?" costs nothing.
 
 **Two switches guard anything dangerous**, and both must pass:
 
@@ -267,9 +274,9 @@ fix.
 | 4 | Voice assistant | **Complete** |
 | 5 | Memory engine | **Complete** |
 | 6 | Remote access and auth | **Complete** |
-| 7 | Developer assistant | Next |
-| 8 | Vision | Planned |
-| 9 | Plugin marketplace | Planned |
+| 7 | Developer assistant | **Complete** |
+| 8 | Vision | **Complete** |
+| 9 | Plugin marketplace | Next |
 | 10 | Autonomous agent | Planned |
 
 See [docs/PHASE_1.md](docs/PHASE_1.md) for what Phase 1 delivered and what it

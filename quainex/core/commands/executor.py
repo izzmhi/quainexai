@@ -43,7 +43,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from quainex.core.brain import IntentType
-from quainex.core.commands.base import Command, CommandResult, CommandStatus
+from quainex.core.commands.base import (
+    Command,
+    CommandContext,
+    CommandResult,
+    CommandStatus,
+)
 from quainex.core.commands.builtin import build_commands
 from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
 from quainex.core.logging import get_logger
@@ -52,7 +57,10 @@ if TYPE_CHECKING:
     from quainex.config.settings import Settings
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent
+    from quainex.core.devtools.assistant import CodeAssistant
+    from quainex.core.devtools.runner import DevRunner
     from quainex.security.confirmations import ConfirmationService
+    from quainex.vision.screen import ScreenAnalyst
 
 _log = get_logger(__name__)
 
@@ -102,7 +110,7 @@ class CommandExecutor:
     def __init__(
         self,
         registry: CommandRegistry,
-        desktop: DesktopController,
+        context: CommandContext,
         settings: Settings,
         confirmations: ConfirmationService | None = None,
     ) -> None:
@@ -110,13 +118,13 @@ class CommandExecutor:
 
         Args:
             registry: Commands available for dispatch.
-            desktop: The controller commands act through.
+            context: The collaborators commands act through.
             settings: Configuration supplying the destructive-action switch.
             confirmations: Issues and verifies confirmation tokens. When absent,
                 only the in-process ``confirmed`` flag can satisfy the gate.
         """
         self._registry = registry
-        self._desktop = desktop
+        self._context = context
         self._settings = settings
         self._confirmations = confirmations
 
@@ -125,7 +133,7 @@ class CommandExecutor:
         """Every executable intent and its summary."""
         return self._registry.catalogue()
 
-    def execute(
+    async def execute(
         self,
         intent: Intent,
         *,
@@ -190,11 +198,11 @@ class CommandExecutor:
                 f"'{intent.intent.value}' needs a target, but none was identified.",
             )
 
-        return self._dispatch(command, intent)
+        return await self._dispatch(command, intent)
 
     # -- internals --------------------------------------------------------
 
-    def _dispatch(self, command: Command, intent: Intent) -> CommandResult:
+    async def _dispatch(self, command: Command, intent: Intent) -> CommandResult:
         """Run a command that has cleared every gate.
 
         Args:
@@ -205,7 +213,7 @@ class CommandExecutor:
             The outcome of the attempt.
         """
         try:
-            outcome = command.handler(self._desktop, intent)
+            outcome = await command.handler(self._context, intent)
         except CommandNotAllowedError as exc:
             # Refused inside the controller (unknown app, path outside roots).
             # No side effect occurred, so this is a refusal, not a failure.
@@ -334,20 +342,32 @@ def build_executor(
     desktop: DesktopController,
     settings: Settings,
     confirmations: ConfirmationService | None = None,
+    *,
+    dev: DevRunner | None = None,
+    code: CodeAssistant | None = None,
+    vision: ScreenAnalyst | None = None,
 ) -> CommandExecutor:
     """Assemble a registry of built-in commands and an executor over it.
+
+    ``dev``, ``code`` and ``vision`` are optional so that a caller wanting only
+    desktop commands — most tests — need not construct a model client to get one.
+    Commands whose collaborator is absent refuse with a clear message rather than
+    failing obscurely.
 
     Args:
         desktop: The controller commands act through.
         settings: Application configuration.
         confirmations: Optional confirmation-token service.
+        dev: Optional development operation runner.
+        code: Optional AI code assistant.
+        vision: Optional screen and document analyst.
 
     Returns:
         A ready-to-use executor.
     """
     return CommandExecutor(
         registry=CommandRegistry(build_commands(settings)),
-        desktop=desktop,
+        context=CommandContext(desktop=desktop, dev=dev, code=code, vision=vision),
         settings=settings,
         confirmations=confirmations,
     )

@@ -89,7 +89,7 @@ ignore = [
 # deliberately fake fixtures, and several exist precisely to prove a bad
 # credential is rejected. SLF001 covers reaching into internals to build an
 # already-expired token.
-"tests/*" = ["S101", "S105", "S106", "SLF001", "D1", "ANN"]
+"tests/*" = ["S101", "S105", "S106", "S603", "S607", "SLF001", "D1", "ANN"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

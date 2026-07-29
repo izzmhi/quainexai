@@ -40,9 +40,12 @@ Future improvements:
 
 from __future__ import annotations
 
-from typing import Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 #: A Pydantic model describing the structure a ``parse()`` call must return.
 ResponseModelT = TypeVar("ResponseModelT", bound=BaseModel)
@@ -126,6 +129,64 @@ class AIProvider(Protocol):
 
         Raises:
             quainex.core.exceptions.ProviderError: The call failed or did not validate.
+            quainex.core.exceptions.ProviderNotConfiguredError: No credentials.
+        """
+        ...
+
+    async def look(
+        self,
+        *,
+        image_paths: list[Path],
+        question: str,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Answer a question about one or more images.
+
+        Phase 8 uses this for screen understanding. Vision lives on the provider
+        rather than in a separate OCR component because a model that can read
+        text in an image can also say what the image *is* — which button to press,
+        which window has focus, what an error dialog means. Bolting on a
+        text-extraction library would return characters and lose all of that.
+
+        Args:
+            image_paths: Images to examine (PNG, JPEG, GIF or WebP).
+            question: What to ask about them.
+            system: Optional system prompt.
+            max_tokens: Optional cap on generated tokens.
+
+        Returns:
+            The answer.
+
+        Raises:
+            quainex.core.exceptions.ProviderError: The call failed or the image
+                could not be read.
+            quainex.core.exceptions.ProviderNotConfiguredError: No credentials.
+        """
+        ...
+
+    async def read_document(
+        self,
+        *,
+        document_path: Path,
+        question: str,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Answer a question about a PDF.
+
+        Args:
+            document_path: The PDF to read.
+            question: What to ask about it.
+            system: Optional system prompt.
+            max_tokens: Optional cap on generated tokens.
+
+        Returns:
+            The answer.
+
+        Raises:
+            quainex.core.exceptions.ProviderError: The call failed or the file
+                could not be read.
             quainex.core.exceptions.ProviderNotConfiguredError: No credentials.
         """
         ...

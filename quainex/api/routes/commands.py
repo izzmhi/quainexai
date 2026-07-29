@@ -125,7 +125,9 @@ async def execute(request: ExecuteRequest, container: ContainerDep) -> CommandRe
     """
     # `confirmed` is never set from an HTTP request: that flag is for in-process
     # callers that genuinely asked the user, such as the voice loop.
-    return container.commands.execute(request.intent, confirmation_token=request.confirmation_token)
+    return await container.commands.execute(
+        request.intent, confirmation_token=request.confirmation_token
+    )
 
 
 @router.post(
@@ -158,5 +160,5 @@ async def ask(request: AskRequest, container: ContainerDep) -> AskResponse:
         utterance=request.utterance,
         history=request.history,
     )
-    result = container.commands.execute(intent)
+    result = await container.commands.execute(intent)
     return AskResponse(intent=intent, result=result)

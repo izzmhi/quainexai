@@ -70,6 +70,17 @@ class IntentType(StrEnum):
     NOTIFY = "notify"
     SYSTEM_INFO = "system_info"
 
+    # --- Developer assistant (Phase 7) ---
+    RUN_DEV_COMMAND = "run_dev_command"
+    EXPLAIN_CODE = "explain_code"
+    REVIEW_CODE = "review_code"
+    GENERATE_CODE = "generate_code"
+
+    # --- Vision (Phase 8) ---
+    LOOK_AT_SCREEN = "look_at_screen"
+    READ_DOCUMENT = "read_document"
+    LIST_WINDOWS = "list_windows"
+
     # --- Conversation ---
     ANSWER_QUESTION = "answer_question"
     SMALL_TALK = "small_talk"
@@ -102,6 +113,29 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
     ),
     IntentType.NOTIFY: "Show a desktop notification. target = the message.",
     IntentType.SYSTEM_INFO: "Report system status such as CPU, memory or battery. No target.",
+    IntentType.RUN_DEV_COMMAND: (
+        "Run a development command. target must be one of these exact keys: "
+        "git.status, git.log, git.diff, git.diff.staged, git.branch, git.add, "
+        "git.commit, git.push, git.pull, tests.run, lint.run, format.check, "
+        "types.check, docker.ps, docker.images. "
+        "For git.commit put the commit message in parameters as key 'message'. "
+        "Put the project folder in parameters as key 'directory' if the user named one."
+    ),
+    IntentType.EXPLAIN_CODE: "Explain what a source file does. target = the file path.",
+    IntentType.REVIEW_CODE: "Review a source file for bugs. target = the file path.",
+    IntentType.GENERATE_CODE: (
+        "Write new code from a description. target = the full description of what to write."
+    ),
+    IntentType.LOOK_AT_SCREEN: (
+        "Answer a question about what is currently on screen. target = the question. "
+        "Use this for 'what does this error say', 'what is on my screen', "
+        "'which button should I click'."
+    ),
+    IntentType.READ_DOCUMENT: (
+        "Answer a question about a PDF file. target = the file path. "
+        "Put the question in parameters as key 'question'."
+    ),
+    IntentType.LIST_WINDOWS: "List the windows that are currently open. No target.",
     IntentType.ANSWER_QUESTION: (
         "The user asked a question needing knowledge, not a machine action. target = the question."
     ),

@@ -72,6 +72,12 @@ class FakeDesktopController:
         return self._record("set_brightness", change)
 
     def screenshot(self, destination: Path) -> str:
+        # Actually writes a file: the real controller's contract is that the
+        # path exists afterwards, and the vision tests check that a captured
+        # screenshot is deleted again. A fake that records without writing
+        # would make that assertion vacuous.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"\x89PNG\r\n\x1a\n fake screenshot")
         return self._record("screenshot", destination)
 
     def read_clipboard(self) -> str:
@@ -150,9 +156,9 @@ def test_catalogue_lists_every_registered_command(tmp_path):
 # -- gate 1: unsupported ---------------------------------------------------
 
 
-def test_non_executable_intent_is_unsupported(tmp_path):
+async def test_non_executable_intent_is_unsupported(tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.SMALL_TALK, target=None)
     )
 
@@ -164,9 +170,9 @@ def test_non_executable_intent_is_unsupported(tmp_path):
 # -- gate 2: confirmation --------------------------------------------------
 
 
-def test_unconfirmed_intent_is_not_executed(tmp_path):
+async def test_unconfirmed_intent_is_not_executed(tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.CLOSE_APPLICATION, "Spotify", requires_confirmation=True)
     )
 
@@ -176,9 +182,9 @@ def test_unconfirmed_intent_is_not_executed(tmp_path):
     assert desktop.calls == [], "nothing may happen before the user says yes"
 
 
-def test_confirmation_unlocks_execution(tmp_path):
+async def test_confirmation_unlocks_execution(tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.CLOSE_APPLICATION, "Spotify", requires_confirmation=True),
         confirmed=True,
     )
@@ -192,9 +198,9 @@ def test_confirmation_unlocks_execution(tmp_path):
 
 
 @pytest.mark.parametrize("intent_type", [IntentType.SHUTDOWN, IntentType.RESTART, IntentType.SLEEP])
-def test_power_actions_are_blocked_by_default(intent_type, tmp_path):
+async def test_power_actions_are_blocked_by_default(intent_type, tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(intent_type, target=None), confirmed=True
     )
 
@@ -204,20 +210,20 @@ def test_power_actions_are_blocked_by_default(intent_type, tmp_path):
     assert desktop.calls == []
 
 
-def test_power_actions_run_when_explicitly_enabled(tmp_path):
+async def test_power_actions_run_when_explicitly_enabled(tmp_path):
     desktop = FakeDesktopController()
     executor = build_executor(desktop, _settings(tmp_path, allow_destructive=True))
-    result = executor.execute(_intent(IntentType.SHUTDOWN, target=None), confirmed=True)
+    result = await executor.execute(_intent(IntentType.SHUTDOWN, target=None), confirmed=True)
 
     assert result.status is CommandStatus.SUCCEEDED
     assert desktop.actions == ["shutdown"]
 
 
-def test_confirmation_is_checked_before_the_destructive_switch(tmp_path):
+async def test_confirmation_is_checked_before_the_destructive_switch(tmp_path):
     # Both gates would refuse; the user-facing one must win, so the message is
     # the actionable "confirm?" rather than a configuration lecture.
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.SHUTDOWN, target=None, requires_confirmation=True)
     )
 
@@ -229,9 +235,9 @@ def test_confirmation_is_checked_before_the_destructive_switch(tmp_path):
 
 
 @pytest.mark.parametrize("target", [None, "", "   "])
-def test_missing_target_fails_before_touching_the_os(target, tmp_path):
+async def test_missing_target_fails_before_touching_the_os(target, tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.OPEN_APPLICATION, target)
     )
 
@@ -243,9 +249,9 @@ def test_missing_target_fails_before_touching_the_os(target, tmp_path):
 # -- dispatch --------------------------------------------------------------
 
 
-def test_successful_command_reports_execution(tmp_path):
+async def test_successful_command_reports_execution(tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(_intent())
+    result = await build_executor(desktop, _settings(tmp_path)).execute(_intent())
 
     assert result.status is CommandStatus.SUCCEEDED
     assert result.executed is True
@@ -253,9 +259,9 @@ def test_successful_command_reports_execution(tmp_path):
     assert desktop.calls == [("open_application", "VS Code")]
 
 
-def test_search_results_are_returned_as_data(tmp_path):
+async def test_search_results_are_returned_as_data(tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.SEARCH_FILES, "report")
     )
 
@@ -264,9 +270,9 @@ def test_search_results_are_returned_as_data(tmp_path):
     assert result.data["results"][0]["path"] == "C:/fake/report.pdf"
 
 
-def test_system_info_is_returned_as_data(tmp_path):
+async def test_system_info_is_returned_as_data(tmp_path):
     desktop = FakeDesktopController()
-    result = build_executor(desktop, _settings(tmp_path)).execute(
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
         _intent(IntentType.SYSTEM_INFO, target=None)
     )
 
@@ -275,7 +281,7 @@ def test_system_info_is_returned_as_data(tmp_path):
     assert "CPU 12%" in result.message
 
 
-def test_clipboard_write_uses_parameters(tmp_path):
+async def test_clipboard_write_uses_parameters(tmp_path):
     from quainex.core.brain import IntentParameter
 
     desktop = FakeDesktopController()
@@ -290,34 +296,36 @@ def test_clipboard_write_uses_parameters(tmp_path):
             IntentParameter(key="text", value="hello"),
         ],
     )
-    result = build_executor(desktop, _settings(tmp_path)).execute(intent)
+    result = await build_executor(desktop, _settings(tmp_path)).execute(intent)
 
     assert result.status is CommandStatus.SUCCEEDED
     assert desktop.calls == [("write_clipboard", "hello")]
 
 
-def test_numeric_level_is_coerced(tmp_path):
+async def test_numeric_level_is_coerced(tmp_path):
     desktop = FakeDesktopController()
-    build_executor(desktop, _settings(tmp_path)).execute(_intent(IntentType.SET_BRIGHTNESS, "40%"))
+    await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.SET_BRIGHTNESS, "40%")
+    )
     assert desktop.calls == [("set_brightness", 40)]
 
 
 # -- controller failures ---------------------------------------------------
 
 
-def test_refusal_from_the_controller_is_blocked_not_failed(tmp_path):
+async def test_refusal_from_the_controller_is_blocked_not_failed(tmp_path):
     # The distinction matters for auditing: nothing happened here.
     desktop = FakeDesktopController(error=CommandNotAllowedError("'Doom' is not allowed"))
-    result = build_executor(desktop, _settings(tmp_path)).execute(_intent(target="Doom"))
+    result = await build_executor(desktop, _settings(tmp_path)).execute(_intent(target="Doom"))
 
     assert result.status is CommandStatus.BLOCKED
     assert result.executed is False
     assert "not allowed" in result.message
 
 
-def test_execution_failure_is_reported_as_failed(tmp_path):
+async def test_execution_failure_is_reported_as_failed(tmp_path):
     desktop = FakeDesktopController(error=CommandExecutionError("not installed"))
-    result = build_executor(desktop, _settings(tmp_path)).execute(_intent())
+    result = await build_executor(desktop, _settings(tmp_path)).execute(_intent())
 
     assert result.status is CommandStatus.FAILED
     assert result.executed is False

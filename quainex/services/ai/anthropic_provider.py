@@ -38,22 +38,46 @@ Future improvements:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import base64
+from typing import TYPE_CHECKING, Literal
 
 import anthropic
 from anthropic import AsyncAnthropic
-from anthropic.types import MessageParam, OutputConfigParam
+from anthropic.types import (
+    ImageBlockParam,
+    MessageParam,
+    OutputConfigParam,
+    TextBlockParam,
+)
 
 from quainex.core.exceptions import ProviderError, ProviderNotConfiguredError
 from quainex.core.logging import get_logger
 from quainex.services.ai.provider import ChatMessage, ResponseModelT
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from anthropic.types import Message, ParsedMessage
 
     from quainex.config.settings import Settings
 
 _PROVIDER_NAME = "anthropic"
+
+#: Image types the API accepts, mapped from file extension. Typed as the literal
+#: union the SDK expects, so a typo here is a type error rather than a 400.
+_IMAGE_MEDIA_TYPES: dict[str, Literal["image/png", "image/jpeg", "image/gif", "image/webp"]] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+#: Per-request ceilings. Screenshots are a few hundred KB, so these bound a
+#: mistake (a whole photo library, a 200 MB scan) rather than normal use.
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+MAX_IMAGES_PER_REQUEST = 8
 
 
 class AnthropicProvider:
@@ -172,6 +196,166 @@ class AnthropicProvider:
                 f"Model returned no object matching schema '{output_model.__name__}'"
             )
         return result
+
+    async def look(
+        self,
+        *,
+        image_paths: list[Path],
+        question: str,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Answer a question about one or more images.
+
+        Args:
+            image_paths: Images to examine.
+            question: What to ask about them.
+            system: Optional system prompt.
+            max_tokens: Optional token cap.
+
+        Returns:
+            The answer text.
+
+        Raises:
+            ProviderNotConfiguredError: No API key is configured.
+            ProviderError: The call failed, or an image was unreadable.
+        """
+        client = self._require_client()
+        if not image_paths:
+            raise ProviderError("No images were provided to look at.")
+
+        content: list[ImageBlockParam | TextBlockParam] = [
+            self._image_block(path) for path in image_paths[:MAX_IMAGES_PER_REQUEST]
+        ]
+        content.append(TextBlockParam(type="text", text=question))
+
+        try:
+            message = await client.messages.create(
+                model=self._settings.ai_model,
+                max_tokens=max_tokens or self._settings.ai_max_tokens,
+                messages=[{"role": "user", "content": content}],
+                system=system if system is not None else anthropic.omit,
+                output_config=self._output_config(),
+            )
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+            raise self._wrap(exc) from exc
+
+        self._guard_refusal(message)
+        return self._extract_text(message)
+
+    async def read_document(
+        self,
+        *,
+        document_path: Path,
+        question: str,
+        system: str | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Answer a question about a PDF.
+
+        The PDF is sent as a document block rather than being converted to text
+        locally. A PDF-to-text library discards layout, tables and figures — the
+        parts of a document a question is most often actually about.
+
+        Args:
+            document_path: The PDF to read.
+            question: What to ask about it.
+            system: Optional system prompt.
+            max_tokens: Optional token cap.
+
+        Returns:
+            The answer text.
+
+        Raises:
+            ProviderNotConfiguredError: No API key is configured.
+            ProviderError: The call failed, or the file was unreadable.
+        """
+        client = self._require_client()
+        payload = self._read_file(document_path, MAX_DOCUMENT_BYTES)
+
+        try:
+            message = await client.messages.create(
+                model=self._settings.ai_model,
+                max_tokens=max_tokens or self._settings.ai_max_tokens,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": base64.standard_b64encode(payload).decode("ascii"),
+                                },
+                            },
+                            {"type": "text", "text": question},
+                        ],
+                    }
+                ],
+                system=system if system is not None else anthropic.omit,
+                output_config=self._output_config(),
+            )
+        except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+            raise self._wrap(exc) from exc
+
+        self._guard_refusal(message)
+        return self._extract_text(message)
+
+    def _image_block(self, path: Path) -> ImageBlockParam:
+        """Build an image content block from a file.
+
+        Args:
+            path: Image file to encode.
+
+        Returns:
+            The content block.
+
+        Raises:
+            ProviderError: The file is missing, too large, or an unsupported type.
+        """
+        media_type = _IMAGE_MEDIA_TYPES.get(path.suffix.lower())
+        if media_type is None:
+            supported = ", ".join(sorted(_IMAGE_MEDIA_TYPES))
+            raise ProviderError(
+                f"'{path.suffix}' is not a supported image type. Supported: {supported}."
+            )
+        payload = self._read_file(path, MAX_IMAGE_BYTES)
+        return ImageBlockParam(
+            type="image",
+            source={
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.standard_b64encode(payload).decode("ascii"),
+            },
+        )
+
+    @staticmethod
+    def _read_file(path: Path, limit: int) -> bytes:
+        """Read a file, enforcing a size ceiling.
+
+        Args:
+            path: File to read.
+            limit: Maximum permitted size in bytes.
+
+        Returns:
+            The file contents.
+
+        Raises:
+            ProviderError: The file is missing, unreadable, or over the limit.
+        """
+        if not path.is_file():
+            raise ProviderError(f"No file at '{path}'.")
+        try:
+            size = path.stat().st_size
+            if size > limit:
+                raise ProviderError(
+                    f"'{path.name}' is {size // 1_000_000} MB; the limit is "
+                    f"{limit // 1_000_000} MB."
+                )
+            return path.read_bytes()
+        except OSError as exc:
+            raise ProviderError(f"Could not read '{path}': {exc}") from exc
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client, if one was created."""

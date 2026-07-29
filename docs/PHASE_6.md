@@ -64,7 +64,7 @@ The single most important design decision in this phase:
 def auth_required(self) -> bool:
     if self.require_auth is not None:
         return self.require_auth
-    return not self.is_loopback        # ← derived from the bind address
+    return not self.is_loopback  # ← derived from the bind address
 ```
 
 A separate `enable_auth` flag would make **"exposed to the network with

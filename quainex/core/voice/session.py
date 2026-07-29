@@ -302,7 +302,7 @@ class VoiceSession:
         history = await self._memory.conversation_context() if self._memory else None
 
         intent = await self._brain.interpret(command_text, history=history)
-        result = self._commands.execute(intent, confirmed=confirmed)
+        result = await self._commands.execute(intent, confirmed=confirmed)
 
         if self._memory is not None:
             await self._memory.remember_exchange(command_text, intent, result)

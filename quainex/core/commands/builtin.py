@@ -1,24 +1,24 @@
 """Built-in command implementations.
 
 Purpose:
-    Bind each ``IntentType`` to the desktop action that carries it out.
+    Bind each ``IntentType`` to the work that carries it out.
 
 This module is deliberately thin. Every handler does three things: pull what it
-needs off the intent, call one ``DesktopController`` method, and describe the
-result. All validation, allowlisting and path containment lives in the
-controller; all policy lives in the executor. If a handler here grows a branch,
-the logic probably belongs in one of those two places instead.
+needs off the intent, call one collaborator on the context, and describe the
+result. All validation, allowlisting and path containment lives in those
+collaborators; all policy lives in the executor. If a handler here grows a
+branch, the logic probably belongs in one of those two places instead.
 
 Architecture:
-    IntentType -> Command(handler=...) -> DesktopController method
+    IntentType -> Command(handler=...) -> CommandContext.{desktop,dev,code,vision}
 
 Dependencies:
-    quainex.core.automation, quainex.core.brain, quainex.core.commands.base
+    quainex.core.{automation,brain,commands,devtools}, quainex.vision
 
 Future improvements:
-    * ``SEARCH_FILES`` should rank hits by recency once memory exists (Phase 5).
-    * ``NOTIFY`` should route through the WebSocket as well, so a notification
-      reaches the phone client too (Phase 6).
+    * ``SEARCH_FILES`` should rank hits by recency once memory is consulted.
+    * ``NOTIFY`` should also route through the WebSocket, so a notification
+      reaches the phone client too.
 """
 
 from __future__ import annotations
@@ -27,12 +27,12 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from quainex.core.brain import IntentType
-from quainex.core.commands.base import Command, CommandOutcome
+from quainex.core.commands.base import Command, CommandContext, CommandOutcome
 from quainex.core.exceptions import CommandNotAllowedError
 
 if TYPE_CHECKING:
     from quainex.config.settings import Settings
-    from quainex.core.automation.desktop import DesktopController, LevelChange
+    from quainex.core.automation.desktop import LevelChange
     from quainex.core.brain import Intent
 
 
@@ -51,6 +51,20 @@ def _target(intent: Intent) -> str:
     return (intent.target or "").strip()
 
 
+def _require(component: object | None, name: str) -> None:
+    """Fail clearly when a command's collaborator is not configured.
+
+    Args:
+        component: The collaborator to check.
+        name: Human-readable name for the error message.
+
+    Raises:
+        CommandNotAllowedError: The collaborator is unavailable.
+    """
+    if component is None:
+        raise CommandNotAllowedError(f"{name} is not available on this instance.")
+
+
 def build_commands(settings: Settings) -> list[Command]:
     """Construct every built-in command, bound to the given configuration.
 
@@ -65,71 +79,68 @@ def build_commands(settings: Settings) -> list[Command]:
     Returns:
         Every built-in command.
     """
+    # --- desktop (Phase 3) ----------------------------------------------
 
-    def open_application(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.open_application(_target(intent)))
+    async def open_application(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.open_application(_target(intent)))
 
-    def close_application(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.close_application(_target(intent)))
+    async def close_application(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.close_application(_target(intent)))
 
-    def open_website(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.open_url(_target(intent)))
+    async def open_website(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.open_url(_target(intent)))
 
-    def open_folder(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.open_folder(_target(intent)))
+    async def open_folder(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.open_folder(_target(intent)))
 
-    def search_files(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        hits = desktop.search_files(_target(intent), settings.command_search_max_results)
+    async def search_files(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        hits = ctx.desktop.search_files(_target(intent), settings.command_search_max_results)
         message = (
             f"Found {len(hits)} file(s) matching '{_target(intent)}'."
             if hits
             else f"No files matched '{_target(intent)}'."
         )
-        return CommandOutcome(
-            message=message,
-            data={"results": [hit.model_dump() for hit in hits]},
-        )
+        return CommandOutcome(message=message, data={"results": [hit.model_dump() for hit in hits]})
 
-    def lock_screen(desktop: DesktopController, _intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.lock_screen())
+    async def lock_screen(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.lock_screen())
 
-    def sleep(desktop: DesktopController, _intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.sleep())
+    async def sleep(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.sleep())
 
-    def restart(desktop: DesktopController, _intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.restart(settings.shutdown_delay_seconds))
+    async def restart(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.restart(settings.shutdown_delay_seconds))
 
-    def shutdown(desktop: DesktopController, _intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.shutdown(settings.shutdown_delay_seconds))
+    async def shutdown(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.shutdown(settings.shutdown_delay_seconds))
 
-    def set_volume(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.set_volume(_coerce_level(_target(intent))))
+    async def set_volume(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.set_volume(_coerce_level(_target(intent))))
 
-    def set_brightness(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.set_brightness(_coerce_level(_target(intent))))
+    async def set_brightness(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.set_brightness(_coerce_level(_target(intent))))
 
-    def screenshot(desktop: DesktopController, _intent: Intent) -> CommandOutcome:
+    async def screenshot(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         destination = settings.screenshot_dir / f"quainex-{stamp}.png"
         return CommandOutcome(
-            message=desktop.screenshot(destination),
-            data={"path": str(destination)},
+            message=ctx.desktop.screenshot(destination), data={"path": str(destination)}
         )
 
-    def clipboard(desktop: DesktopController, intent: Intent) -> CommandOutcome:
+    async def clipboard(ctx: CommandContext, intent: Intent) -> CommandOutcome:
         parameters = intent.parameters_as_dict()
         action = parameters.get("action", "read").lower()
         if action == "write":
             text = parameters.get("text") or _target(intent)
-            return CommandOutcome(message=desktop.write_clipboard(text))
-        contents = desktop.read_clipboard()
+            return CommandOutcome(message=ctx.desktop.write_clipboard(text))
+        contents = ctx.desktop.read_clipboard()
         return CommandOutcome(message=contents, data={"text": contents})
 
-    def notify(desktop: DesktopController, intent: Intent) -> CommandOutcome:
-        return CommandOutcome(message=desktop.notify(_target(intent), title="Quainex"))
+    async def notify(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.notify(_target(intent), title="Quainex"))
 
-    def system_info(desktop: DesktopController, _intent: Intent) -> CommandOutcome:
-        snapshot = desktop.system_info()
+    async def system_info(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        snapshot = ctx.desktop.system_info()
         message = (
             f"CPU {snapshot.cpu_percent:.0f}%, "
             f"memory {snapshot.memory_percent:.0f}%, "
@@ -138,6 +149,65 @@ def build_commands(settings: Settings) -> list[Command]:
         if snapshot.battery_percent is not None:
             message += f", battery {snapshot.battery_percent:.0f}%"
         return CommandOutcome(message=message, data=snapshot.model_dump())
+
+    # --- developer assistant (Phase 7) ----------------------------------
+
+    async def run_dev_command(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.dev, "Development tooling")
+        assert ctx.dev is not None  # noqa: S101 - narrowed by _require
+        parameters = intent.parameters_as_dict()
+        result = ctx.dev.run(
+            _target(intent),
+            directory=parameters.get("directory"),
+            message=parameters.get("message"),
+        )
+        headline = "succeeded" if result.succeeded else f"exited with {result.exit_code}"
+        return CommandOutcome(
+            message=f"{result.operation} {headline}.\n\n{result.output}",
+            data=result.model_dump(),
+        )
+
+    async def explain_code(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.code, "Code assistance")
+        assert ctx.code is not None  # noqa: S101
+        return CommandOutcome(message=await ctx.code.explain(_target(intent)))
+
+    async def review_code(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.code, "Code assistance")
+        assert ctx.code is not None  # noqa: S101
+        review = await ctx.code.review(_target(intent))
+        counts = f"{len(review.findings)} finding(s)"
+        return CommandOutcome(message=f"{review.verdict} ({counts})", data=review.model_dump())
+
+    async def generate_code(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.code, "Code assistance")
+        assert ctx.code is not None  # noqa: S101
+        return CommandOutcome(message=await ctx.code.generate(_target(intent)))
+
+    # --- vision (Phase 8) -----------------------------------------------
+
+    async def look_at_screen(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.vision, "Vision")
+        assert ctx.vision is not None  # noqa: S101
+        question = _target(intent) or "What is on the screen right now?"
+        return CommandOutcome(message=await ctx.vision.look_at_screen(question))
+
+    async def read_document(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.vision, "Vision")
+        assert ctx.vision is not None  # noqa: S101
+        parameters = intent.parameters_as_dict()
+        question = parameters.get("question") or "Summarise this document."
+        return CommandOutcome(message=await ctx.vision.read_document(_target(intent), question))
+
+    async def list_windows(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        _require(ctx.vision, "Vision")
+        assert ctx.vision is not None  # noqa: S101
+        windows = ctx.vision.list_windows()
+        titles = ", ".join(window.title for window in windows[:10]) or "none"
+        return CommandOutcome(
+            message=f"{len(windows)} window(s) open: {titles}",
+            data={"windows": [window.model_dump() for window in windows]},
+        )
 
     return [
         Command(
@@ -225,6 +295,46 @@ def build_commands(settings: Settings) -> list[Command]:
             intent=IntentType.SYSTEM_INFO,
             summary="Report CPU, memory, disk and battery.",
             handler=system_info,
+        ),
+        Command(
+            intent=IntentType.RUN_DEV_COMMAND,
+            summary="Run an allowlisted development command (git, tests, lint, docker).",
+            handler=run_dev_command,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.EXPLAIN_CODE,
+            summary="Explain what a source file does.",
+            handler=explain_code,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.REVIEW_CODE,
+            summary="Review a source file for defects.",
+            handler=review_code,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.GENERATE_CODE,
+            summary="Write code from a description. Returns text; writes nothing.",
+            handler=generate_code,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.LOOK_AT_SCREEN,
+            summary="Answer a question about what is on screen.",
+            handler=look_at_screen,
+        ),
+        Command(
+            intent=IntentType.READ_DOCUMENT,
+            summary="Answer a question about a PDF.",
+            handler=read_document,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.LIST_WINDOWS,
+            summary="List open windows. Local; no model call.",
+            handler=list_windows,
         ),
     ]
 
