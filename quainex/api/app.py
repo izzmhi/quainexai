@@ -41,7 +41,7 @@ from fastapi import FastAPI
 
 from quainex.api.errors import install_error_handlers
 from quainex.api.middleware import CorrelationIdMiddleware
-from quainex.api.routes import brain, commands, health, ws
+from quainex.api.routes import brain, commands, health, memory, voice, ws
 from quainex.config.settings import Settings, get_settings
 from quainex.core.container import Container
 
@@ -79,6 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             Control back to the server for the lifetime of the application.
         """
         container = Container.create(resolved)
+        await container.start()
         app.state.container = container
         app.state.started_at = time.monotonic()
 
@@ -115,6 +116,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(brain.router)
     app.include_router(commands.router)
+    app.include_router(voice.router)
+    app.include_router(memory.router)
     app.include_router(ws.router)
 
     return app

@@ -102,6 +102,25 @@ class CommandNotAllowedError(QuainexError):
     http_status = HTTPStatus.FORBIDDEN
 
 
+class SpeechError(QuainexError):
+    """Speech recognition or synthesis failed."""
+
+    error_code = "speech_error"
+    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class SpeechUnavailableError(SpeechError):
+    """The speech subsystem is not installed or not ready.
+
+    Separate from ``SpeechError`` because the fix is an install or a download,
+    not a retry — and because Quainex is designed to run without it. Voice is an
+    optional capability layered on a system that works fine by text.
+    """
+
+    error_code = "speech_unavailable"
+    http_status = HTTPStatus.SERVICE_UNAVAILABLE
+
+
 class ProviderError(QuainexError):
     """An upstream provider call failed.
 

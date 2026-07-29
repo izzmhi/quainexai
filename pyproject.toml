@@ -17,9 +17,24 @@ dependencies = [
     "psutil>=6.1",      # process inspection/termination, system metrics
     "pillow>=11.0",     # screen capture via ImageGrab
     "pyperclip>=1.9",   # clipboard read/write
+    # --- Phase 4: voice ---
+    "python-multipart>=0.0.20",  # audio file uploads to /voice/transcribe
+    # --- Phase 5: memory ---
+    "sqlalchemy>=2.0",  # ORM over SQLite now, PostgreSQL later
+    "aiosqlite>=0.20",  # async SQLite driver
 ]
 
 [project.optional-dependencies]
+# Speech-to-text and microphone capture. Kept OPTIONAL because Whisper model
+# weights are hundreds of megabytes and this machine has a history of stalling
+# large CDN transfers. Quainex boots and works by text without any of it; the
+# voice subsystem reports itself unavailable instead of failing to start.
+#   pip install -e ".[voice]"
+voice = [
+    "faster-whisper>=1.1",  # CTranslate2 Whisper — far lighter than torch
+    "sounddevice>=0.5",     # microphone capture via PortAudio
+    "numpy>=2.0",           # audio buffers
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -88,9 +103,10 @@ plugins = ["pydantic.mypy"]
 module = "tests.*"
 disallow_untyped_defs = false
 
-# pyperclip ships no type stubs and has no types-* package.
+# These ship no type stubs and have no types-* packages. Each is reached through
+# a Protocol boundary, so the untyped surface is confined to one adapter module.
 [[tool.mypy.overrides]]
-module = "pyperclip"
+module = ["pyperclip", "faster_whisper", "sounddevice"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

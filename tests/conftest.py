@@ -43,6 +43,9 @@ def settings(tmp_path: Path) -> Settings:
         environment="dev",
         log_dir=tmp_path / "logs",
         anthropic_api_key=None,
+        # Each test gets its own database file, so no test can see another's
+        # memories and none of them touch the real store in the repo root.
+        database_path=tmp_path / "test.db",
     )
 
 

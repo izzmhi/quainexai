@@ -50,6 +50,10 @@ from quainex.core.brain import Brain
 from quainex.core.commands import CommandExecutor, build_executor
 from quainex.core.exceptions import ConfigurationError
 from quainex.core.logging import configure_logging, get_logger
+from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
+from quainex.core.speech import WindowsSapiTTS
+from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSession
+from quainex.database.engine import Database
 from quainex.services.ai.anthropic_provider import AnthropicProvider
 
 if TYPE_CHECKING:
@@ -70,6 +74,9 @@ class Container:
         brain: Natural language to structured intent classifier.
         desktop: Platform controller performing OS-level actions.
         commands: Policy-enforcing dispatcher for classified intents.
+        voice: Spoken conversation loop.
+        database: Connection to the persistent store.
+        memory: Short-term conversation context and long-term recall.
     """
 
     settings: Settings
@@ -78,6 +85,9 @@ class Container:
     brain: Brain
     desktop: DesktopController
     commands: CommandExecutor
+    voice: VoiceSession
+    database: Database
+    memory: MemoryManager
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -105,6 +115,24 @@ class Container:
         desktop = WindowsDesktopController(resolved)
         commands = build_executor(desktop=desktop, settings=resolved)
 
+        # The engine is created here but the schema is not: DDL is async, so it
+        # happens in `start()` during the application lifespan.
+        database = Database.create(resolved)
+        memory = MemoryManager(SqlAlchemyMemoryStore(database), resolved)
+
+        # Voice components are constructed unconditionally but load nothing:
+        # the Whisper model is fetched on first use, so a missing or undownloaded
+        # model surfaces as "unavailable" rather than as a failed startup.
+        voice = VoiceSession(
+            stt=FasterWhisperSTT(resolved),
+            tts=WindowsSapiTTS(resolved),
+            recorder=MicrophoneRecorder(resolved),
+            brain=brain,
+            commands=commands,
+            settings=resolved,
+            memory=memory,
+        )
+
         logger.info(
             "container_initialised",
             environment=resolved.environment.value,
@@ -112,6 +140,7 @@ class Container:
             ai_available=ai_provider.is_available,
             commands_registered=len(commands.catalogue),
             destructive_commands_enabled=resolved.allow_destructive_commands,
+            voice_available=voice.is_available,
         )
         return cls(
             settings=resolved,
@@ -120,7 +149,18 @@ class Container:
             brain=brain,
             desktop=desktop,
             commands=commands,
+            voice=voice,
+            database=database,
+            memory=memory,
         )
+
+    async def start(self) -> None:
+        """Complete the asynchronous part of startup.
+
+        Separate from ``create()`` because schema creation is async and a
+        constructor cannot await. Called from the application lifespan.
+        """
+        await self.database.create_schema()
 
     @staticmethod
     def _build_ai_provider(settings: Settings) -> AIProvider:
@@ -149,4 +189,5 @@ class Container:
         Called from the application's shutdown hook. Safe to call more than once.
         """
         await self.ai_provider.aclose()
+        await self.database.aclose()
         self.logger.info("container_closed")

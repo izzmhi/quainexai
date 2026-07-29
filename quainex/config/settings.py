@@ -140,6 +140,54 @@ class Settings(BaseSettings):
     # Where screenshots are written.
     screenshot_dir: Path = Field(default_factory=lambda: Path.home() / "Pictures" / "Quainex")
 
+    # --- Memory (Phase 5) -------------------------------------------------
+    # Where the SQLite file lives. Relative paths resolve to the repo root.
+    database_path: Path = Path("quainex.db")
+    # Override to point at PostgreSQL later, e.g.
+    # postgresql+asyncpg://user:pass@host/quainex
+    database_url_override: str | None = None
+
+    # How many recent turns the Brain receives as conversation context. Enough to
+    # resolve "close it" after "open Spotify"; bounded so token cost stays flat
+    # however long a session runs.
+    memory_context_turns: int = Field(default=6, ge=0, le=50)
+
+    # --- Voice (Phase 4) --------------------------------------------------
+    wake_word: str = "quainex"
+    # How close a transcribed word must be to the wake word to count. Speech
+    # recognition mangles unusual names ("Quinex", "Kwainex", "Quain X"), so
+    # exact matching would make the assistant deaf to its own name.
+    #
+    # Kept at 0.75 deliberately. Lowering it to 0.70 to admit "kwainex" (0.714)
+    # also admits "equinox", which scores exactly the same — edit distance cannot
+    # tell a real mishearing from an unrelated word. Homophones are handled by
+    # phonetic folding in `detect_wake_word` instead, which is targeted where a
+    # looser threshold is indiscriminate.
+    wake_word_similarity: float = Field(default=0.75, ge=0.0, le=1.0)
+    voice_require_wake_word: bool = True
+
+    # Recording bounds. `max_seconds` caps a microphone stuck open; recording
+    # normally ends earlier, once speech is followed by `silence_seconds` of quiet.
+    voice_max_seconds: float = Field(default=15.0, gt=0)
+    voice_silence_seconds: float = Field(default=1.2, gt=0)
+    # RMS amplitude (16-bit scale) below which a block counts as silence.
+    voice_silence_threshold: float = Field(default=350.0, ge=0)
+
+    # Recordings are deleted after transcription by default: audio of a room is
+    # not something to accumulate on disk without being asked.
+    keep_recordings: bool = False
+
+    # Whisper model size: tiny | base | small | medium | large-v3. Larger is more
+    # accurate, slower, and a bigger first-run download.
+    whisper_model: str = "base"
+    whisper_compute_type: str = "int8"
+    whisper_beam_size: int = Field(default=1, ge=1, le=10)
+
+    # --- Speech output (Phase 4) -----------------------------------------
+    tts_enabled: bool = True
+    tts_rate: int = Field(default=0, ge=-10, le=10)
+    tts_voice: str | None = None
+
     @model_validator(mode="after")
     def _enforce_production_invariants(self) -> Self:
         """Force debug off in production.
@@ -151,6 +199,30 @@ class Settings(BaseSettings):
         if self.environment is Environment.PROD and self.debug:
             object.__setattr__(self, "debug", False)
         return self
+
+    @model_validator(mode="after")
+    def _resolve_database_path(self) -> Self:
+        """Anchor a relative database path to the repo root.
+
+        Same reasoning as the log directory: without this, the store would move
+        with the working directory and Quainex would silently start with an empty
+        memory depending on where it was launched from.
+        """
+        if not self.database_path.is_absolute():
+            object.__setattr__(self, "database_path", REPO_ROOT / self.database_path)
+        return self
+
+    @property
+    def database_url(self) -> str:
+        """The SQLAlchemy URL for the configured store.
+
+        Returns:
+            The override when set, otherwise an async SQLite URL for
+            ``database_path``.
+        """
+        if self.database_url_override:
+            return self.database_url_override
+        return f"sqlite+aiosqlite:///{self.database_path.as_posix()}"
 
     @model_validator(mode="after")
     def _resolve_log_dir(self) -> Self:

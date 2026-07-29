@@ -7,10 +7,21 @@ understands natural language, automates workflows, controls the machine it runs
 on, and eventually manages a digital life — while staying privacy-conscious and
 under the user's control.
 
-> **Status: Phases 1–3 of 10 complete.**
-> Quainex can now understand a spoken or typed request, classify it into a typed
-> intent, and execute it on this machine — behind two independent safety gates.
-> There is no voice input yet and no memory; those are Phases 4 and 5.
+> **Status: Phases 1–5 of 10 complete.**
+> Quainex understands a spoken or typed request, classifies it into a typed
+> intent, executes it on this machine behind two independent safety gates,
+> answers out loud, and remembers the exchange. Remote control from a phone is
+> Phase 6.
+
+## Optional: voice
+
+```powershell
+pip install -e ".[voice]"      # Whisper + microphone capture
+```
+
+Kept optional deliberately — Whisper weights are a large first-run download, and
+Quainex runs fine by text without them. Speech *output* needs no download at all,
+so it works either way. `GET /voice/status` reports each component separately.
 
 ## What it can do today
 
@@ -26,9 +37,24 @@ curl -X POST http://127.0.0.1:8000/commands/ask `
   -d '{\"utterance\": \"take a screenshot\"}'
 ```
 
+```powershell
+# Speak to it (needs the voice extra), or post recognised text
+curl -X POST http://127.0.0.1:8000/voice/turn `
+  -H "Content-Type: application/json" `
+  -d '{\"text\": \"Quainex, take a screenshot\"}'
+
+# See what it remembers
+curl http://127.0.0.1:8000/memory/activity
+```
+
 15 commands: open/close applications, open websites and folders, search files,
 lock, sleep, restart, shut down, volume, brightness, screenshot, clipboard,
 notifications, system info. `GET /commands` lists them.
+
+It also **remembers** — recent turns (so "close it" resolves), your preferences,
+facts you tell it, and an append-only record of everything it has done. All of it
+is listable and deletable through `/memory`, except the audit trail, which is
+deliberately read-only.
 
 **Two switches guard anything dangerous**, and both must pass:
 
@@ -229,9 +255,9 @@ fix.
 | 1 | Project foundation | **Complete** |
 | 2 | Brain — intent detection | **Complete** |
 | 3 | Desktop automation | **Complete** |
-| 4 | Voice assistant | Next |
-| 5 | Memory engine | Planned |
-| 6 | Phone remote control | Planned |
+| 4 | Voice assistant | **Complete** |
+| 5 | Memory engine | **Complete** |
+| 6 | Phone remote control | Next |
 | 7 | Developer assistant | Planned |
 | 8 | Vision | Planned |
 | 9 | Plugin marketplace | Planned |
