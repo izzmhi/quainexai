@@ -1,0 +1,19 @@
+# Example Quainex plugin manifest.
+#
+# Everything here is readable WITHOUT running any plugin code — that is the
+# point of keeping discovery and loading separate. What you see below is what
+# you are agreeing to when you enable it.
+
+[plugin]
+name = "hello"
+version = "1.0.0"
+description = "A worked example: shows how a plugin declares permissions and exposes actions."
+author = "Quainex"
+
+# This plugin asks for very little on purpose. Compare a real integration:
+# a Spotify plugin would need "network", and you would want to notice that.
+permissions = ["memory", "ai"]
+
+[plugin.actions]
+greet = "Return a greeting, optionally remembering your name."
+ask = "Ask the language model a question."

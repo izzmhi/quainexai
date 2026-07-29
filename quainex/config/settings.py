@@ -174,6 +174,22 @@ class Settings(BaseSettings):
     # however long a session runs.
     memory_context_turns: int = Field(default=6, ge=0, le=50)
 
+    # --- Plugins (Phase 9) ------------------------------------------------
+    # Where plugins are looked for. Relative paths resolve to the repo root.
+    plugin_dir: Path = Path("plugins_installed")
+    # Plugins are discovered but never loaded automatically: their code first
+    # runs when you enable them, after seeing what permissions they asked for.
+    plugin_autoload: list[str] = Field(default_factory=list)
+
+    # --- Autonomous agent (Phase 10) --------------------------------------
+    # Ceilings for one unattended run. Deliberately modest: an agent that can
+    # run 200 steps unattended is one bug away from doing so.
+    agent_max_steps: int = Field(default=12, ge=1, le=100)
+    agent_max_seconds: float = Field(default=300.0, gt=0, le=3600)
+    agent_max_actions: int = Field(default=20, ge=1, le=200)
+    # How often one action may repeat before the run is treated as stuck.
+    agent_max_repeats: int = Field(default=3, ge=1, le=20)
+
     # --- Voice (Phase 4) --------------------------------------------------
     wake_word: str = "quainex"
     # How close a transcribed word must be to the wake word to count. Speech
@@ -232,6 +248,8 @@ class Settings(BaseSettings):
         """
         if not self.database_path.is_absolute():
             object.__setattr__(self, "database_path", REPO_ROOT / self.database_path)
+        if not self.plugin_dir.is_absolute():
+            object.__setattr__(self, "plugin_dir", REPO_ROOT / self.plugin_dir)
         return self
 
     @property

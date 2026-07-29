@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING
 
 from quainex.auth import TokenService
 from quainex.config.settings import AIProviderName, Settings, get_settings
+from quainex.core.agent import AutonomousAgent
 from quainex.core.automation import WindowsDesktopController
 from quainex.core.brain import Brain
 from quainex.core.commands import CommandExecutor, build_executor
@@ -57,6 +58,7 @@ from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
 from quainex.core.speech import WindowsSapiTTS
 from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSession
 from quainex.database.engine import Database
+from quainex.plugins import PluginRegistry
 from quainex.security import ConfirmationService, RateLimiter
 from quainex.services.ai.anthropic_provider import AnthropicProvider
 from quainex.vision import ScreenAnalyst
@@ -89,6 +91,8 @@ class Container:
         dev: Runs allowlisted development operations.
         code: AI-backed code explanation, review and generation.
         vision: Screen and document understanding.
+        plugins: Discovers and dispatches to installed plugins.
+        agent: Plans and carries out goals within a budget.
     """
 
     settings: Settings
@@ -106,6 +110,8 @@ class Container:
     dev: DevRunner
     code: CodeAssistant
     vision: ScreenAnalyst
+    plugins: PluginRegistry
+    agent: AutonomousAgent
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -182,6 +188,21 @@ class Container:
             memory=memory,
         )
 
+        plugins = PluginRegistry(
+            resolved,
+            commands=commands,
+            provider=ai_provider,
+            memory=memory,
+            desktop=desktop,
+        )
+        agent = AutonomousAgent(
+            provider=ai_provider,
+            brain=brain,
+            commands=commands,
+            settings=resolved,
+            memory=memory,
+        )
+
         logger.info(
             "container_initialised",
             environment=resolved.environment.value,
@@ -209,6 +230,8 @@ class Container:
             dev=dev,
             code=code,
             vision=vision,
+            plugins=plugins,
+            agent=agent,
         )
 
     async def start(self) -> None:

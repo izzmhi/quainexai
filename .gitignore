@@ -39,3 +39,6 @@ desktop.ini
 .idea/
 .vscode/*
 !.vscode/settings.json
+
+# Plugin runtime state (not source)
+plugins_installed/*/data/

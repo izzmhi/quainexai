@@ -41,7 +41,16 @@ from fastapi import Depends, FastAPI
 
 from quainex.api.errors import install_error_handlers
 from quainex.api.middleware import CorrelationIdMiddleware
-from quainex.api.routes import auth, brain, commands, health, memory, voice, ws
+from quainex.api.routes import (
+    agent,
+    auth,
+    brain,
+    commands,
+    health,
+    memory,
+    voice,
+    ws,
+)
 from quainex.auth import require_auth
 from quainex.config.settings import Settings, get_settings
 from quainex.core.container import Container
@@ -127,6 +136,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(commands.router, dependencies=[protected])
     app.include_router(voice.router, dependencies=[protected])
     app.include_router(memory.router, dependencies=[protected])
+    app.include_router(agent.agent_router, dependencies=[protected])
+    app.include_router(agent.plugin_router, dependencies=[protected])
 
     # The WebSocket authenticates in its own handshake: HTTP dependencies do not
     # apply to a socket upgrade, and browsers cannot set headers on one.

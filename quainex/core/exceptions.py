@@ -121,6 +121,32 @@ class RateLimitedError(QuainexError):
     http_status = HTTPStatus.TOO_MANY_REQUESTS
 
 
+class PluginError(QuainexError):
+    """A plugin failed to load or to handle a request."""
+
+    error_code = "plugin_error"
+    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class PluginPermissionError(PluginError):
+    """A plugin used a capability it did not declare.
+
+    Raised rather than returning silently, so a plugin missing a permission
+    looks like a configuration problem — which it is — rather than a bug in the
+    plugin's own logic.
+    """
+
+    error_code = "plugin_permission_denied"
+    http_status = HTTPStatus.FORBIDDEN
+
+
+class AgentError(QuainexError):
+    """The autonomous agent could not continue."""
+
+    error_code = "agent_error"
+    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 class SpeechError(QuainexError):
     """Speech recognition or synthesis failed."""
 
