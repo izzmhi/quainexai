@@ -174,6 +174,17 @@ class Settings(BaseSettings):
     # however long a session runs.
     memory_context_turns: int = Field(default=6, ge=0, le=50)
 
+    # --- Telegram bridge --------------------------------------------------
+    # Phone control without exposing this machine: the bridge polls outward, so
+    # no port is forwarded and no certificate is needed.
+    # Get a token from @BotFather; get your user id from @userinfobot.
+    telegram_bot_token: SecretStr | None = None
+    # Only these Telegram user ids are obeyed. Empty means the bridge stays off:
+    # a bot with no allowlist would take orders from anyone who found it.
+    telegram_allowed_users: list[int] = Field(default_factory=list)
+    # Start polling automatically when the application starts.
+    telegram_autostart: bool = False
+
     # --- Plugins (Phase 9) ------------------------------------------------
     # Where plugins are looked for. Relative paths resolve to the repo root.
     plugin_dir: Path = Path("plugins_installed")

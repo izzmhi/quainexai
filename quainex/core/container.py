@@ -41,7 +41,9 @@ Future improvements:
 
 from __future__ import annotations
 
+import asyncio
 import secrets
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -58,6 +60,7 @@ from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
 from quainex.core.speech import WindowsSapiTTS
 from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSession
 from quainex.database.engine import Database
+from quainex.integrations import TelegramBridge
 from quainex.plugins import PluginRegistry
 from quainex.security import ConfirmationService, RateLimiter
 from quainex.services.ai.anthropic_provider import AnthropicProvider
@@ -93,6 +96,7 @@ class Container:
         vision: Screen and document understanding.
         plugins: Discovers and dispatches to installed plugins.
         agent: Plans and carries out goals within a budget.
+        telegram: Phone bridge. Constructed always, polls only when started.
     """
 
     settings: Settings
@@ -112,6 +116,9 @@ class Container:
     vision: ScreenAnalyst
     plugins: PluginRegistry
     agent: AutonomousAgent
+    telegram: TelegramBridge
+    #: Handle on the polling task, so shutdown can cancel it.
+    _telegram_task: asyncio.Task[None] | None = None
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -202,6 +209,9 @@ class Container:
             settings=resolved,
             memory=memory,
         )
+        telegram = TelegramBridge(
+            resolved, brain=brain, commands=commands, voice=voice, memory=memory
+        )
 
         logger.info(
             "container_initialised",
@@ -232,6 +242,7 @@ class Container:
             vision=vision,
             plugins=plugins,
             agent=agent,
+            telegram=telegram,
         )
 
     async def start(self) -> None:
@@ -241,6 +252,13 @@ class Container:
         constructor cannot await. Called from the application lifespan.
         """
         await self.database.create_schema()
+
+        if self.settings.telegram_autostart and self.telegram.is_configured:
+            # Fire-and-forget: the bridge polls forever, so awaiting it here
+            # would stop the application from finishing startup. The reference
+            # is kept so shutdown can cancel it rather than leaking the task.
+            self._telegram_task = asyncio.create_task(self.telegram.run())
+            self.logger.info("telegram_autostarted")
 
     @staticmethod
     def _build_ai_provider(settings: Settings) -> AIProvider:
@@ -268,6 +286,13 @@ class Container:
 
         Called from the application's shutdown hook. Safe to call more than once.
         """
+        self.telegram.stop()
+        if self._telegram_task is not None:
+            self._telegram_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._telegram_task
+            self._telegram_task = None
+
         await self.ai_provider.aclose()
         await self.database.aclose()
         self.logger.info("container_closed")

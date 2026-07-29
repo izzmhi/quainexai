@@ -1,0 +1,91 @@
+# Continuous integration for Quainex.
+#
+# Every check here has, until now, only ever run on one developer's machine.
+# That is the gap this closes: a broken commit should be caught by the repo, not
+# by the next person to pull it.
+#
+# Runs on Windows because Quainex is a Windows-first product — the desktop
+# controller, the speech engine and the window enumeration are all Win32. Testing
+# on Linux would pass while telling us nothing about the platform users are on.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Allow running by hand from the Actions tab.
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch: the newest push is the one that
+# matters, and a queue of stale runs just delays feedback on it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, types and tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the project and its dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Check formatting
+        run: ruff format --check .
+
+      - name: Type check
+        run: mypy quainex main.py
+
+      - name: Run tests
+        # QUAINEX_* variables are deliberately absent: the suite must pass on a
+        # clean machine with no API key and no configuration, which is also how
+        # a new contributor first encounters it.
+        run: pytest -q
+
+  package:
+    name: Import check on a clean install
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime dependencies only
+        # No dev extras, no voice extras. This proves Quainex starts for someone
+        # who ran a plain `pip install`, which is the path most users take and
+        # the one the test suite does not otherwise exercise.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Verify the application builds without optional extras
+        run: |
+          python -c "from quainex.api.app import create_app; app = create_app(); print(f'app ok: {len(app.routes)} routes')"

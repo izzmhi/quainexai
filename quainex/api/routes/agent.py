@@ -26,15 +26,19 @@ Future improvements:
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
 from quainex.api.dependencies import ContainerDep
 from quainex.core.agent import AgentBudget, AgentRun
+from quainex.core.exceptions import ConfigurationError
 from quainex.plugins import DiscoveredPlugin, PluginRequest, PluginResponse
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
 plugin_router = APIRouter(prefix="/plugins", tags=["plugins"])
+telegram_router = APIRouter(prefix="/telegram", tags=["telegram"])
 
 
 class RunRequest(BaseModel):
@@ -145,3 +149,57 @@ async def invoke_plugin(
         The plugin's response.
     """
     return await container.plugins.invoke(name, request)
+
+
+@telegram_router.get("/status", summary="Telegram bridge state")
+async def telegram_status(container: ContainerDep) -> dict[str, object]:
+    """Report whether the phone bridge is configured and running.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        Configuration and run state.
+    """
+    return container.telegram.status()
+
+
+@telegram_router.post("/start", summary="Start polling Telegram")
+async def telegram_start(container: ContainerDep) -> dict[str, object]:
+    """Begin polling for phone messages.
+
+    Started as a background task rather than awaited: the bridge polls until
+    stopped, so awaiting it here would never return.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        The bridge state after starting.
+
+    Raises:
+        ConfigurationError: No bot token or no allowed users configured.
+    """
+    bridge = container.telegram
+    if not bridge.is_configured:
+        raise ConfigurationError(
+            "Telegram is not configured. Set QUAINEX_TELEGRAM_BOT_TOKEN (from "
+            "@BotFather) and QUAINEX_TELEGRAM_ALLOWED_USERS (from @userinfobot)."
+        )
+    if not bridge.is_running:
+        asyncio.create_task(bridge.run())  # noqa: RUF006 - lifetime owned by the bridge
+    return bridge.status()
+
+
+@telegram_router.post("/stop", summary="Stop polling Telegram")
+async def telegram_stop(container: ContainerDep) -> dict[str, object]:
+    """Stop polling for phone messages.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        The bridge state after stopping.
+    """
+    container.telegram.stop()
+    return container.telegram.status()

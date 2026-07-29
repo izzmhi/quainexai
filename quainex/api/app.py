@@ -138,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(memory.router, dependencies=[protected])
     app.include_router(agent.agent_router, dependencies=[protected])
     app.include_router(agent.plugin_router, dependencies=[protected])
+    app.include_router(agent.telegram_router, dependencies=[protected])
 
     # The WebSocket authenticates in its own handshake: HTTP dependencies do not
     # apply to a socket upgrade, and browsers cannot set headers on one.
