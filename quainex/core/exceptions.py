@@ -79,6 +79,29 @@ class InvalidUtteranceError(QuainexError):
     http_status = HTTPStatus.BAD_REQUEST
 
 
+class CommandExecutionError(QuainexError):
+    """A command was permitted to run but failed while running.
+
+    Distinct from being refused: the request was legitimate, the action was
+    attempted, and the operating system did not cooperate.
+    """
+
+    error_code = "command_failed"
+    http_status = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+class CommandNotAllowedError(QuainexError):
+    """A command was refused before any side effect occurred.
+
+    Raised when the target is not allowlisted, escapes its permitted roots, or
+    the action is disabled by configuration. The distinction from
+    ``CommandExecutionError`` matters for auditing: nothing happened here.
+    """
+
+    error_code = "command_not_allowed"
+    http_status = HTTPStatus.FORBIDDEN
+
+
 class ProviderError(QuainexError):
     """An upstream provider call failed.
 

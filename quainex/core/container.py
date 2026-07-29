@@ -45,7 +45,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from quainex.config.settings import AIProviderName, Settings, get_settings
+from quainex.core.automation import WindowsDesktopController
 from quainex.core.brain import Brain
+from quainex.core.commands import CommandExecutor, build_executor
 from quainex.core.exceptions import ConfigurationError
 from quainex.core.logging import configure_logging, get_logger
 from quainex.services.ai.anthropic_provider import AnthropicProvider
@@ -53,6 +55,7 @@ from quainex.services.ai.anthropic_provider import AnthropicProvider
 if TYPE_CHECKING:
     import structlog
 
+    from quainex.core.automation import DesktopController
     from quainex.services.ai.provider import AIProvider
 
 
@@ -65,12 +68,16 @@ class Container:
         logger: Root application logger, pre-bound with app identity.
         ai_provider: The configured language model backend.
         brain: Natural language to structured intent classifier.
+        desktop: Platform controller performing OS-level actions.
+        commands: Policy-enforcing dispatcher for classified intents.
     """
 
     settings: Settings
     logger: structlog.stdlib.BoundLogger
     ai_provider: AIProvider
     brain: Brain
+    desktop: DesktopController
+    commands: CommandExecutor
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -95,18 +102,24 @@ class Container:
 
         ai_provider = cls._build_ai_provider(resolved)
         brain = Brain(provider=ai_provider, settings=resolved)
+        desktop = WindowsDesktopController(resolved)
+        commands = build_executor(desktop=desktop, settings=resolved)
 
         logger.info(
             "container_initialised",
             environment=resolved.environment.value,
             ai_provider=ai_provider.name,
             ai_available=ai_provider.is_available,
+            commands_registered=len(commands.catalogue),
+            destructive_commands_enabled=resolved.allow_destructive_commands,
         )
         return cls(
             settings=resolved,
             logger=logger,
             ai_provider=ai_provider,
             brain=brain,
+            desktop=desktop,
+            commands=commands,
         )
 
     @staticmethod

@@ -36,7 +36,7 @@ could argue its way past the safety gate, because that flag would just be more
 text the model generates. Instead the flag is computed locally:
 
 ```python
-if classification.intent in CONFIRMATION_REQUIRED:   # shutdown/restart/sleep/close
+if classification.intent in CONFIRMATION_REQUIRED:  # shutdown/restart/sleep/close
     return True
 return classification.confidence < settings.brain_confidence_threshold
 ```

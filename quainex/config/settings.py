@@ -122,6 +122,24 @@ class Settings(BaseSettings):
     # are flagged as needing user confirmation before Phase 3 acts on them.
     brain_confidence_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
 
+    # --- Commands (Phase 3) ----------------------------------------------
+    # Master switch for irreversible power actions (shutdown, restart, sleep).
+    # Defaults to OFF: an AI operating system that can power off the machine on a
+    # misheard word is worse than one that has to be told it may.
+    allow_destructive_commands: bool = False
+
+    # Grace period before a scheduled shutdown or restart fires, leaving a window
+    # in which `shutdown /a` aborts it.
+    shutdown_delay_seconds: int = Field(default=15, ge=0, le=600)
+
+    # Directories file search and folder-opening are confined to. Anything
+    # outside these is refused, so a misresolved path cannot reach system files.
+    command_search_roots: list[Path] = Field(default_factory=lambda: [Path.home()])
+    command_search_max_results: int = Field(default=50, ge=1, le=500)
+
+    # Where screenshots are written.
+    screenshot_dir: Path = Field(default_factory=lambda: Path.home() / "Pictures" / "Quainex")
+
     @model_validator(mode="after")
     def _enforce_production_invariants(self) -> Self:
         """Force debug off in production.
@@ -150,6 +168,19 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """Whether the process is running in the production environment."""
         return self.environment is Environment.PROD
+
+    @property
+    def resolved_search_roots(self) -> tuple[Path, ...]:
+        """Return the permitted command roots, canonicalised.
+
+        Resolved here rather than at each use site so that containment checks
+        always compare canonical paths — comparing a raw path against a resolved
+        root is the classic way a ``..`` traversal slips through.
+
+        Returns:
+            Absolute, symlink-free root directories.
+        """
+        return tuple(root.expanduser().resolve() for root in self.command_search_roots)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

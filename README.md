@@ -7,11 +7,38 @@ understands natural language, automates workflows, controls the machine it runs
 on, and eventually manages a digital life — while staying privacy-conscious and
 under the user's control.
 
-> **Status: Phase 1 of 10 — Project Foundation.**
-> What exists today is the skeleton: configuration, structured logging,
-> dependency injection, a FastAPI server with a health endpoint and a WebSocket
-> channel, error handling, and tests. There is no command execution, no voice,
-> and no memory yet. Those are Phases 3, 4 and 5.
+> **Status: Phases 1–3 of 10 complete.**
+> Quainex can now understand a spoken or typed request, classify it into a typed
+> intent, and execute it on this machine — behind two independent safety gates.
+> There is no voice input yet and no memory; those are Phases 4 and 5.
+
+## What it can do today
+
+```powershell
+# Understand a request without acting on it
+curl -X POST http://127.0.0.1:8000/brain/interpret `
+  -H "Content-Type: application/json" `
+  -d '{\"utterance\": \"Open VS Code\"}'
+
+# Understand and act, in one call
+curl -X POST http://127.0.0.1:8000/commands/ask `
+  -H "Content-Type: application/json" `
+  -d '{\"utterance\": \"take a screenshot\"}'
+```
+
+15 commands: open/close applications, open websites and folders, search files,
+lock, sleep, restart, shut down, volume, brightness, screenshot, clipboard,
+notifications, system info. `GET /commands` lists them.
+
+**Two switches guard anything dangerous**, and both must pass:
+
+| Switch | Question it answers | Who decides |
+|---|---|---|
+| `requires_confirmation` | "Are you sure?" | you, per action |
+| `QUAINEX_ALLOW_DESTRUCTIVE_COMMANDS` | "May Quainex ever do this?" | you, once, in `.env` |
+
+Out of the box the second is `false`, so **Quainex cannot power off your machine
+no matter what it is told**.
 
 ---
 
@@ -200,9 +227,9 @@ fix.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Project foundation | **Complete** |
-| 2 | Brain — intent detection | Next |
-| 3 | Desktop automation | Planned |
-| 4 | Voice assistant | Planned |
+| 2 | Brain — intent detection | **Complete** |
+| 3 | Desktop automation | **Complete** |
+| 4 | Voice assistant | Next |
 | 5 | Memory engine | Planned |
 | 6 | Phone remote control | Planned |
 | 7 | Developer assistant | Planned |

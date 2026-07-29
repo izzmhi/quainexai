@@ -13,6 +13,10 @@ dependencies = [
     "pydantic-settings>=2.6",
     "structlog>=24.4",
     "anthropic>=0.40",
+    # --- Phase 3: desktop automation ---
+    "psutil>=6.1",      # process inspection/termination, system metrics
+    "pillow>=11.0",     # screen capture via ImageGrab
+    "pyperclip>=1.9",   # clipboard read/write
 ]
 
 [project.optional-dependencies]
@@ -22,6 +26,7 @@ dev = [
     "httpx>=0.27",
     "ruff>=0.7",
     "mypy>=1.13",
+    "types-psutil>=6.1",
 ]
 
 [project.scripts]
@@ -82,6 +87,11 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# pyperclip ships no type stubs and has no types-* package.
+[[tool.mypy.overrides]]
+module = "pyperclip"
+ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------
 # Tests
