@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -266,6 +267,7 @@ class TelegramBridge:
         )
 
         async with httpx.AsyncClient(timeout=_POLL_TIMEOUT_SECONDS + 10) as client:
+            await self._register_commands(client)
             while self._running:
                 try:
                     for update in await self._poll(client):
@@ -309,6 +311,34 @@ class TelegramBridge:
     def stop(self) -> None:
         """Ask the polling loop to finish."""
         self._running = False
+
+    async def _register_commands(self, client: httpx.AsyncClient) -> None:
+        """Publish the slash-command menu, so Telegram offers "/" suggestions.
+
+        This is what puts ``/help``, ``/status`` and ``/start`` in the blue menu
+        beside the message box — the small thing that makes the bot feel finished
+        rather than improvised. Best-effort: the bot works identically without it,
+        so a failure here is logged and shrugged off, never fatal.
+
+        Args:
+            client: HTTP client.
+        """
+        try:
+            await client.post(
+                f"{self._url()}/setMyCommands",
+                json={
+                    "commands": [
+                        {"command": "help", "description": "Everything Quainex can do"},
+                        {"command": "status", "description": "A live snapshot of this machine"},
+                        {"command": "start", "description": "Welcome and a few examples"},
+                    ]
+                },
+                timeout=10,
+            )
+        except Exception as exc:
+            # Registering the menu must never jeopardise the poll loop; any failure
+            # here is cosmetic, so every exception type is caught, not just HTTP ones.
+            _log.warning("telegram_setmycommands_failed", error=str(exc))
 
     async def diagnose(self) -> dict[str, object]:
         """Check the token against Telegram and report who has messaged the bot.
@@ -479,7 +509,7 @@ class TelegramBridge:
         """
         command = text.strip()
         if command.startswith("/"):
-            await self._send(client, chat_id, await self._builtin(command))
+            await self._send(client, chat_id, await self._builtin(command), parse_mode="HTML")
             return
 
         # A "typing…" indicator from the first moment, kept alive for the whole
@@ -788,28 +818,25 @@ class TelegramBridge:
     async def _builtin(self, command: str) -> str:
         """Answer a slash command locally, without the model.
 
+        Returns HTML — the slash commands are the bridge's own "chrome", fully under
+        its control, so they can be styled richly and safely. Arbitrary command
+        *output* stays plain text, where an unescaped ``<`` in a file name or page
+        title cannot break a message.
+
         Args:
             command: The slash command.
 
         Returns:
-            The reply text.
+            The reply text, as Telegram-flavoured HTML.
         """
         verb = command.split()[0].lower()
-        if verb in {"/start", "/help"}:
-            return (
-                "🟢 Quainex\n\n"
-                "Send me a request in plain language, or a voice note:\n"
-                "  • open chrome · close spotify · what's running\n"
-                "  • take a screenshot · take a webcam picture\n"
-                "  • set volume to 30 · pause · next\n"
-                "  • send me my latest download\n"
-                "  • where is my laptop · panic\n\n"
-                "Anything risky comes back with Yes/No buttons first.\n\n"
-                "/status — a live snapshot of this machine"
-            )
+        if verb == "/start":
+            return _WELCOME
+        if verb == "/help":
+            return _HELP
         if verb == "/status":
             return await self._status_report()
-        return f"Unknown command `{verb}`. Try /help."
+        return f"Unknown command <code>{_esc(verb)}</code>. Try /help."
 
     async def _status_report(self) -> str:
         """Build a rich, live snapshot of the machine.
@@ -823,7 +850,7 @@ class TelegramBridge:
             A formatted multi-line status.
         """
         desktop = self._commands.context.desktop
-        lines = ["📟 Quainex — status", ""]
+        lines = ["📟 <b>Quainex — status</b>", ""]
 
         try:
             snap = desktop.system_info()
@@ -832,22 +859,22 @@ class TelegramBridge:
             )
             uptime = _format_uptime(snap.uptime_seconds)
             lines.append(
-                f"🖥 CPU {snap.cpu_percent:.0f}% · RAM {snap.memory_percent:.0f}% · "
-                f"Disk {snap.disk_percent:.0f}%{battery}"
+                f"🖥 <b>CPU</b> {snap.cpu_percent:.0f}% · <b>RAM</b> {snap.memory_percent:.0f}% · "
+                f"<b>Disk</b> {snap.disk_percent:.0f}%{battery}"
             )
             lines.append(f"⏱ Up {uptime}")
         except Exception as exc:
-            lines.append(f"🖥 System metrics unavailable ({exc}).")
+            lines.append(f"🖥 System metrics unavailable ({_esc(str(exc))}).")
 
         try:
-            lines.append(f"📶 {desktop.wifi_status()}")
+            lines.append(f"📶 {_esc(desktop.wifi_status())}")
         except Exception:
             lines.append("📶 Wi-Fi state unavailable.")
 
         try:
             apps = desktop.list_running_apps(8)
             if apps:
-                lines.append("🪟 Running: " + ", ".join(apps))
+                lines.append("🪟 Running: " + _esc(", ".join(apps)))
         except Exception:
             # The process list is a nicety; its absence just drops one line.
             _log.debug("status_running_apps_unavailable")
@@ -856,7 +883,9 @@ class TelegramBridge:
         lines.append(f"🎙 Voice notes: {voice}")
 
         lines.append("")
-        lines.append(f"⚙️ {len(self._commands.catalogue)} commands · everything above cost 0 tokens")
+        lines.append(
+            f"⚙️ {len(self._commands.catalogue)} commands · everything above cost 0 tokens"
+        )
         blocked = ", ".join(sorted(i.value for i in TELEGRAM_BLOCKED_INTENTS))
         lines.append(f"🔒 Kept off Telegram: {blocked}")
         return "\n".join(lines)
@@ -880,31 +909,51 @@ class TelegramBridge:
         """
         return f"{_API_ROOT}/bot{self._token()}"
 
-    async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str) -> None:
-        """Send a plain message.
+    async def _send(
+        self,
+        client: httpx.AsyncClient,
+        chat_id: int,
+        text: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
+        """Send a message, optionally formatted, always delivered.
 
-        **No ``parse_mode``**, and that is a fix, not an omission. Every message
-        used to be sent as Markdown, so any reply containing an underscore or
-        asterisk — a file name like ``twilio_2FA.txt``, an intent like
-        ``look_at_screen`` — was invalid Markdown, and Telegram rejected the whole
-        message with a 400. The reply simply never arrived, which is
-        indistinguishable from "it ignored me". Plain text always delivers; the
-        emoji and line structure carry the styling without the fragility.
+        ``parse_mode`` defaults to ``None`` — plain text — because arbitrary command
+        *output* (a file name like ``twilio_2FA.txt``, a page title with an ``&``)
+        must never be reinterpreted as markup. This is the scar from the Markdown
+        era, when every reply carrying an underscore or asterisk was rejected with a
+        400 and silently never arrived. So the bridge only opts specific,
+        fully-controlled messages into ``"HTML"`` — ``/help``, ``/status``,
+        confirmations — where it has escaped every dynamic value itself.
 
-        The send is checked now too: a non-2xx is logged rather than swallowed, so
-        a message that fails to deliver leaves a trace instead of vanishing.
+        And even those degrade rather than disappear: if Telegram rejects the
+        formatting with a 400, the message is re-sent as plain text with the tags
+        stripped. A styling mistake can cost the styling; it can never cost the
+        message. Every other failure is logged, so nothing vanishes without a trace.
 
         Args:
             client: HTTP client.
             chat_id: Where to send.
             text: What to send, truncated to Telegram's limit.
+            parse_mode: ``"HTML"`` for bridge-composed messages, else plain text.
         """
+        body = _truncate(text)
+        payload: dict[str, object] = {"chat_id": chat_id, "text": body}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         try:
-            response = await client.post(
-                f"{self._url()}/sendMessage",
-                json={"chat_id": chat_id, "text": _truncate(text)},
-            )
+            response = await client.post(f"{self._url()}/sendMessage", json=payload)
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if parse_mode and exc.response.status_code == 400:
+                # Formatting was rejected. The message itself must still arrive, so
+                # retry once as plain text — the hard-won rule that a reply never
+                # silently vanishes for the sake of how it looks.
+                _log.warning("telegram_formatting_rejected", error=str(exc))
+                await self._send(client, chat_id, _plain(body))
+                return
+            _log.warning("telegram_send_failed", error=str(exc))
         except httpx.HTTPError as exc:
             _log.warning("telegram_send_failed", error=str(exc))
 
@@ -927,7 +976,8 @@ class TelegramBridge:
             f"{self._url()}/sendMessage",
             json={
                 "chat_id": chat_id,
-                "text": _truncate(question),
+                "text": _truncate(f"⚠️ <b>Confirm</b>\n\n{_esc(question)}"),
+                "parse_mode": "HTML",
                 "reply_markup": {
                     "inline_keyboard": [
                         [
@@ -972,6 +1022,97 @@ def _truncate(text: str) -> str:
     if len(text) <= _MAX_MESSAGE_CHARS:
         return text
     return text[:_MAX_MESSAGE_CHARS] + "\n\n…(truncated)"
+
+
+def _esc(text: str) -> str:
+    """Escape the three characters that carry meaning in Telegram HTML.
+
+    Applied to every dynamic value that goes into an HTML message — a Wi-Fi SSID, a
+    process name, an error string — so a stray ``<`` or ``&`` styles nothing and,
+    more importantly, does not make Telegram reject the whole message.
+
+    Args:
+        text: Untrusted text.
+
+    Returns:
+        The text, safe to drop between HTML tags.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _plain(html: str) -> str:
+    """Reduce a piece of Telegram HTML back to readable plain text.
+
+    The fallback path when Telegram rejects formatting: strip the tags and undo the
+    escaping, so the reader gets the words even when the styling could not be shown.
+
+    Args:
+        html: The HTML that was rejected.
+
+    Returns:
+        Tag-free, unescaped text.
+    """
+    stripped = re.sub(r"<[^>]+>", "", html)
+    return stripped.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+#: The /start welcome. Short and inviting — the first thing a new user sees.
+_WELCOME = (
+    "🟢 <b>Quainex</b>\n"
+    "<i>Your machine, in your pocket.</i>\n\n"
+    "Send me a request in plain language — or a voice note — and I'll carry it out "
+    "and reply. For example:\n"
+    "• <code>open chrome</code>\n"
+    "• <code>take a screenshot</code>\n"
+    "• <code>send me my latest download</code>\n\n"
+    "Anything risky asks first, with <b>Yes</b> / <b>No</b> buttons.\n\n"
+    "<b>/help</b> — everything I can do\n"
+    "<b>/status</b> — a live snapshot of this machine"
+)
+
+#: The /help catalogue. Grouped and scannable rather than an alphabetical dump —
+#: a person reaches for a capability by area ("sound", "files"), not by name.
+_HELP = (
+    "📖 <b>Quainex — what I can do</b>\n"
+    "Talk to me in plain language, or send a <b>voice note</b>.\n\n"
+    "🌐 <b>Browser</b> — I steer it and send a screenshot each step\n"
+    "• <code>browse github.com</code> — open a site\n"
+    "• <code>search best laptops 2026</code> — search the web\n"
+    "• <code>scroll down</code> · <code>click Sign in</code> · <code>go back</code>\n"
+    "• <code>close the browser</code>\n\n"
+    "🖥 <b>Apps &amp; windows</b>\n"
+    "• <code>open spotify</code> · <code>close spotify</code>\n"
+    "• <code>what's running</code> · <code>list windows</code>\n"
+    "• <code>minimise this window</code> · <code>maximise</code>\n\n"
+    "🔊 <b>Sound &amp; media</b>\n"
+    "• <code>set volume to 30</code> · <code>mute</code>\n"
+    "• <code>play</code> · <code>pause</code> · <code>next</code>\n\n"
+    "📸 <b>See &amp; capture</b>\n"
+    "• <code>take a screenshot</code>\n"
+    "• <code>take a webcam photo</code>\n\n"
+    "📁 <b>Files &amp; folders</b>\n"
+    "• <code>open downloads</code> · <code>open desktop</code>\n"
+    "• <code>create a folder called work</code>\n"
+    "• <code>find report.pdf</code>\n"
+    "• <code>send me my latest download</code>\n\n"
+    "🛡 <b>Security &amp; location</b>\n"
+    "• <code>panic</code> — lock, photo &amp; locate, sent to you\n"
+    "• <code>where is my laptop</code>\n"
+    "• <code>lock the screen</code>\n"
+    "• <code>wifi off</code> · <code>wifi status</code>\n\n"
+    "💡 <b>Display &amp; keyboard</b>\n"
+    "• <code>set brightness to 50</code>\n"
+    "• <code>keyboard light on</code> · <code>off</code>\n\n"
+    "💬 <b>Ask &amp; code</b>\n"
+    "• Ask me anything, or <code>write code to…</code>\n"
+    "• <code>explain this file…</code> · <code>review…</code>\n"
+    "• <code>read this PDF and…</code>\n\n"
+    "⚡ <b>Power</b>\n"
+    "• <code>sleep</code> · <code>shut down</code> · <code>restart</code>\n\n"
+    "<b>/status</b> — a live snapshot of this machine\n\n"
+    "Anything risky asks first, with <b>Yes</b> / <b>No</b> buttons. A few things "
+    "stay on this machine for privacy: clipboard, screen reading, documents."
+)
 
 
 def _explain(error: QuainexError) -> str:

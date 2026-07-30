@@ -8,6 +8,7 @@ refused, and that a confirmation still has to be a real one.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import httpx
@@ -21,7 +22,9 @@ from quainex.core.exceptions import ProviderError
 from quainex.integrations.telegram import (
     TELEGRAM_BLOCKED_INTENTS,
     TelegramBridge,
+    _esc,
     _parse_update,
+    _plain,
     _truncate,
 )
 from quainex.security import ConfirmationService
@@ -629,3 +632,47 @@ async def test_status_is_a_rich_local_snapshot(tmp_path):
 
 async def test_unknown_slash_commands_are_reported(tmp_path):
     assert "Unknown command" in await _bridge(tmp_path)._builtin("/launch_missiles")
+
+
+async def test_help_is_a_categorised_catalogue(tmp_path):
+    """The full menu, grouped by area rather than an alphabetical dump."""
+    reply = await _bridge(tmp_path)._builtin("/help")
+
+    # Every major area a person reaches for is represented.
+    for phrase in ("Browser", "browse", "panic", "screenshot", "volume", "brightness"):
+        assert phrase in reply, f"help should mention {phrase!r}"
+
+
+async def test_builtin_replies_are_valid_telegram_html(tmp_path):
+    """The bridge opts its own messages into HTML, so they must be well-formed.
+
+    A malformed tag or a bare ``&`` is exactly what made Markdown replies vanish
+    with a 400. These messages are static and under the bridge's control, so the
+    guarantee is simply that they parse.
+    """
+    bridge = _bridge(tmp_path)
+    for command in ("/start", "/help", "/status"):
+        html = await bridge._builtin(command)
+        # Tags are balanced and drawn only from Telegram's allowed set.
+        stack: list[str] = []
+        for match in re.finditer(r"<(/?)([a-zA-Z]+)[^>]*>", html):
+            closing, tag = match.group(1), match.group(2).lower()
+            assert tag in {"b", "i", "u", "s", "code", "pre", "a", "blockquote"}
+            if closing:
+                assert stack and stack.pop() == tag, f"{command}: mismatched </{tag}>"
+            else:
+                stack.append(tag)
+        assert not stack, f"{command}: unclosed {stack}"
+        # No bare ampersand — every & must open a valid entity.
+        assert not re.search(r"&(?!amp;|lt;|gt;|quot;|#\d+;)", html), f"{command}: bare &"
+
+
+def test_escaping_and_the_plain_text_fallback_round_trip():
+    """Dynamic values are escaped going in, and recoverable coming back out.
+
+    ``_plain`` is the safety net: if Telegram ever rejects the HTML, the bridge
+    resends the same message stripped to text — a styling failure must never cost
+    the message itself.
+    """
+    assert _esc("Rock & <Roll>") == "Rock &amp; &lt;Roll&gt;"
+    assert _plain("<b>Up</b> 2h &amp; ticking") == "Up 2h & ticking"
