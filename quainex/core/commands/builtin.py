@@ -215,6 +215,63 @@ def build_commands(settings: Settings) -> list[Command]:
             message=ctx.desktop.screenshot(destination), data={"path": str(destination)}
         )
 
+    async def _browser_shot(ctx: CommandContext, url: str, title: str) -> CommandOutcome:
+        """Screenshot the browser and package it for Telegram to send.
+
+        Args:
+            ctx: The command context (its browser is used).
+            url: The page's current URL, for the caption.
+            title: The page's title, for the caption.
+
+        Returns:
+            An outcome carrying the screenshot path.
+        """
+        assert ctx.browser is not None  # noqa: S101 - narrowed by the caller
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
+        shot = settings.screenshot_dir / f"quainex-browser-{stamp}.png"
+        await ctx.browser.screenshot(shot)
+        caption = title.strip() or url
+        return CommandOutcome(
+            message=f"🌐 {caption}\n{url}",
+            data={"path": str(shot), "url": url},
+        )
+
+    async def browse(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.browser, "Browser control")
+        assert ctx.browser is not None  # noqa: S101
+        url, title = await ctx.browser.open(_target(intent))
+        return await _browser_shot(ctx, url, title)
+
+    async def browser_scroll(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.browser, "Browser control")
+        assert ctx.browser is not None  # noqa: S101
+        url, title = await ctx.browser.scroll(_target(intent).lower() or "down")
+        return await _browser_shot(ctx, url, title)
+
+    async def browser_click(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.browser, "Browser control")
+        assert ctx.browser is not None  # noqa: S101
+        url, title = await ctx.browser.click(_target(intent))
+        return await _browser_shot(ctx, url, title)
+
+    async def browser_type(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.browser, "Browser control")
+        assert ctx.browser is not None  # noqa: S101
+        url, title = await ctx.browser.type_text(_target(intent))
+        return await _browser_shot(ctx, url, title)
+
+    async def browser_back(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        _require(ctx.browser, "Browser control")
+        assert ctx.browser is not None  # noqa: S101
+        url, title = await ctx.browser.back()
+        return await _browser_shot(ctx, url, title)
+
+    async def browser_close(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        _require(ctx.browser, "Browser control")
+        assert ctx.browser is not None  # noqa: S101
+        await ctx.browser.close()
+        return CommandOutcome(message="Closed the browser.")
+
     async def keyboard_light(ctx: CommandContext, intent: Intent) -> CommandOutcome:
         on = _target(intent).lower() in {"on", "enable", "up", "bright"}
         return CommandOutcome(message=ctx.desktop.set_keyboard_light(enabled=on))
@@ -479,6 +536,39 @@ def build_commands(settings: Settings) -> list[Command]:
             summary="Turn the keyboard backlight on or off (where the firmware allows).",
             handler=keyboard_light,
             requires_target=True,
+        ),
+        Command(
+            intent=IntentType.BROWSE,
+            summary="Open a page in the steerable browser and screenshot it.",
+            handler=browse,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.BROWSER_SCROLL,
+            summary="Scroll the browser page and screenshot it.",
+            handler=browser_scroll,
+        ),
+        Command(
+            intent=IntentType.BROWSER_CLICK,
+            summary="Click a link or button by text, then screenshot.",
+            handler=browser_click,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.BROWSER_TYPE,
+            summary="Type into the browser and press Enter, then screenshot.",
+            handler=browser_type,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.BROWSER_BACK,
+            summary="Go back one page in the browser.",
+            handler=browser_back,
+        ),
+        Command(
+            intent=IntentType.BROWSER_CLOSE,
+            summary="Close the steerable browser.",
+            handler=browser_close,
         ),
         Command(
             intent=IntentType.MEDIA_CONTROL,

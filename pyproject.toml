@@ -50,6 +50,13 @@ camera = [
 audio = [
     "pycaw>=20240210",  # IAudioEndpointVolume, for set-to-a-percentage
 ]
+# Steerable web browser. Playwright drives the installed Edge (channel="msedge")
+# rather than downloading Chromium, which this machine's connection would not
+# survive. Without it, browser commands report unavailable.
+#   pip install -e ".[browser]"
+browser = [
+    "playwright>=1.40",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -125,14 +132,14 @@ disallow_untyped_defs = false
 # These ship no type stubs and have no types-* packages. Each is reached through
 # a Protocol boundary, so the untyped surface is confined to one adapter module.
 [[tool.mypy.overrides]]
-module = ["pyperclip", "faster_whisper", "sounddevice", "pygrabber", "pygrabber.*", "pycaw", "pycaw.*"]
+module = ["pyperclip", "faster_whisper", "sounddevice", "pygrabber", "pygrabber.*", "pycaw", "pycaw.*", "playwright", "playwright.*"]
 ignore_missing_imports = true
 
 # pygrabber's classes carry no annotations, so every call reads as untyped. The
 # surface is confined to webcam.py, one adapter behind the DesktopController
 # Protocol — the same containment the other untyped libraries get.
 [[tool.mypy.overrides]]
-module = "quainex.core.automation.webcam"
+module = ["quainex.core.automation.webcam", "quainex.core.browser.session"]
 disallow_untyped_calls = false
 
 # ---------------------------------------------------------------------------

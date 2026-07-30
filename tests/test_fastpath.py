@@ -396,6 +396,44 @@ def test_send_file_is_local(said: str, target: str):
     assert result.target == target
 
 
+# -- the steerable browser -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "intent", "target"),
+    [
+        ("browse github.com", IntentType.BROWSE, "github.com"),
+        ("browse best laptops 2026", IntentType.BROWSE, "best laptops 2026"),
+        ("open youtube.com in the browser", IntentType.BROWSE, "youtube.com"),
+        ("scroll down", IntentType.BROWSER_SCROLL, "down"),
+        ("scroll to bottom", IntentType.BROWSER_SCROLL, "bottom"),
+        ("click the login button", IntentType.BROWSER_CLICK, "login button"),
+        ("type hello world", IntentType.BROWSER_TYPE, "hello world"),
+    ],
+)
+def test_browser_control_is_local(said: str, intent: IntentType, target: str):
+    """Steering the browser costs no tokens.
+
+    Only the page content does, and that is fetched by the browser, not a model.
+    """
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is intent
+    assert result.target == target
+
+
+def test_browser_back_and_close_take_no_target():
+    assert classify_locally("go back").intent is IntentType.BROWSER_BACK
+    assert classify_locally("close the browser").intent is IntentType.BROWSER_CLOSE
+
+
+def test_the_controlled_browser_is_distinct_from_a_plain_launch():
+    """The browse verb steers the headless browser; open launches real Edge."""
+    assert classify_locally("browse github.com").intent is IntentType.BROWSE
+    assert classify_locally("open github.com").intent is IntentType.OPEN_WEBSITE
+
+
 # -- what it must refuse ---------------------------------------------------
 
 

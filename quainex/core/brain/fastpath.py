@@ -329,6 +329,28 @@ _KEYBOARD_LIGHT_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^keyboard (?:light|backlight|leds?) (?P<t>on|off)$"),
 )
 
+#: The steerable browser. "browse"/"in the browser" distinguish these from the
+#: plain "open X.com" that launches the real Edge — this is the controlled,
+#: screenshot-per-step browser instead.
+_BROWSE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^browse (?:to )?(?P<target>.+)$"),
+    re.compile(r"^open (?P<target>.+) in (?:the |a )?browser$"),
+    re.compile(r"^open (?:the |a )?browser (?:and )?(?:go to |open |browse )?(?P<target>.+)$"),
+)
+
+_BROWSER_SCROLL_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^scroll (?:to (?:the )?)?(?P<t>up|down|top|bottom)$"),
+    re.compile(r"^scroll (?:the )?page (?P<t>up|down)$"),
+)
+
+#: Click and type only make sense with a page already open; the handler errors
+#: clearly if none is. "back"/"previous" alone are media controls, so browser-back
+#: needs the explicit "go back" / "page" phrasing.
+_BROWSER_CLICK_PATTERN = re.compile(r"^(?:click|tap)(?: on)? (?:the )?(?P<target>.+)$")
+_BROWSER_TYPE_PATTERN = re.compile(r"^(?:type|enter)(?: in)? (?P<target>.+)$")
+_BROWSER_BACK_PATTERN = re.compile(r"^(?:go back|browser back|previous page|back a page)$")
+_BROWSER_CLOSE_PATTERN = re.compile(r"^close (?:the )?browser$")
+
 #: Reasoning recorded on a local match, so the audit trail distinguishes a
 #: classification nobody paid for from one a model produced.
 _REASON = "Matched a built-in pattern locally; no model call was needed."
@@ -441,6 +463,23 @@ def classify_locally(utterance: str) -> IntentClassification | None:
     for pattern in _SEND_FILE_PATTERNS:
         if match := pattern.match(text):
             return _classification(IntentType.SEND_FILE, match.group("target").strip())
+
+    # Browser control, before the app/website patterns so "open X in the browser"
+    # and "browse X" are the controlled browser, not a raw Edge launch.
+    if _BROWSER_CLOSE_PATTERN.match(text):
+        return _classification(IntentType.BROWSER_CLOSE, None)
+    if _BROWSER_BACK_PATTERN.match(text):
+        return _classification(IntentType.BROWSER_BACK, None)
+    for pattern in _BROWSER_SCROLL_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.BROWSER_SCROLL, match.group("t"))
+    for pattern in _BROWSE_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.BROWSE, match.group("target").strip())
+    if match := _BROWSER_CLICK_PATTERN.match(text):
+        return _classification(IntentType.BROWSER_CLICK, match.group("target").strip())
+    if match := _BROWSER_TYPE_PATTERN.match(text):
+        return _classification(IntentType.BROWSER_TYPE, match.group("target").strip())
 
     # Before the application patterns, which would otherwise claim
     # "open github.com" as an application named "github.com".

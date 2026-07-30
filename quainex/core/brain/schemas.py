@@ -93,6 +93,14 @@ class IntentType(StrEnum):
     READ_DOCUMENT = "read_document"
     LIST_WINDOWS = "list_windows"
 
+    # --- Controlled browser ---
+    BROWSE = "browse"
+    BROWSER_SCROLL = "browser_scroll"
+    BROWSER_CLICK = "browser_click"
+    BROWSER_TYPE = "browser_type"
+    BROWSER_BACK = "browser_back"
+    BROWSER_CLOSE = "browser_close"
+
     # --- Conversation ---
     ANSWER_QUESTION = "answer_question"
     SMALL_TALK = "small_talk"
@@ -192,6 +200,23 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
         "Put the question in parameters as key 'question'."
     ),
     IntentType.LIST_WINDOWS: "List the windows that are currently open. No target.",
+    IntentType.BROWSE: (
+        "Open a page in the steerable browser and screenshot it. target = a URL, a "
+        "site, or a search phrase. Use for 'browse to X', 'open X in the browser'."
+    ),
+    IntentType.BROWSER_SCROLL: (
+        "Scroll the browser page and screenshot it. target = 'up', 'down', 'top' or 'bottom'."
+    ),
+    IntentType.BROWSER_CLICK: (
+        "Click a link or button in the browser by its text, then screenshot. "
+        "target = the visible text to click."
+    ),
+    IntentType.BROWSER_TYPE: (
+        "Type into the browser's focused field and press Enter, then screenshot. "
+        "target = the text to type."
+    ),
+    IntentType.BROWSER_BACK: "Go back one page in the browser, then screenshot. No target.",
+    IntentType.BROWSER_CLOSE: "Close the steerable browser. No target.",
     IntentType.ANSWER_QUESTION: (
         "The user asked a question needing knowledge, not a machine action. target = the question."
     ),

@@ -453,6 +453,97 @@ async def test_search_results_are_returned_as_data(tmp_path):
     assert result.data["results"][0]["path"] == "C:/fake/report.pdf"
 
 
+class FakeBrowser:
+    """A browser double that records actions and writes real screenshots.
+
+    Attributes:
+        calls: Every ``(action, argument)`` received.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+        self.closed = False
+
+    async def open(self, target: str) -> tuple[str, str]:
+        self.calls.append(("open", target))
+        return (f"https://example.com/{target}", "Example")
+
+    async def scroll(self, direction: str) -> tuple[str, str]:
+        self.calls.append(("scroll", direction))
+        return ("https://example.com", "Example")
+
+    async def click(self, text: str) -> tuple[str, str]:
+        self.calls.append(("click", text))
+        return ("https://example.com/clicked", "Clicked")
+
+    async def type_text(self, text: str) -> tuple[str, str]:
+        self.calls.append(("type", text))
+        return ("https://example.com/typed", "Typed")
+
+    async def back(self) -> tuple[str, str]:
+        self.calls.append(("back", None))
+        return ("https://example.com", "Back")
+
+    async def screenshot(self, destination: Path) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"\x89PNG\r\n\x1a\n fake page")
+        return destination
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+async def test_browse_returns_a_screenshot_to_send(tmp_path):
+    """Every browser step comes back with an image the Telegram bridge uploads."""
+    browser = FakeBrowser()
+    result = await build_executor(
+        FakeDesktopController(), _settings(tmp_path), browser=browser
+    ).execute(_intent(IntentType.BROWSE, "example.com"))
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert ("open", "example.com") in browser.calls
+    assert result.data is not None
+    assert Path(result.data["path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("intent_type", "target", "expected"),
+    [
+        (IntentType.BROWSER_SCROLL, "down", ("scroll", "down")),
+        (IntentType.BROWSER_CLICK, "login", ("click", "login")),
+        (IntentType.BROWSER_TYPE, "hello", ("type", "hello")),
+    ],
+)
+async def test_browser_actions_reach_the_session(tmp_path, intent_type, target, expected):
+    browser = FakeBrowser()
+    result = await build_executor(
+        FakeDesktopController(), _settings(tmp_path), browser=browser
+    ).execute(_intent(intent_type, target))
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert expected in browser.calls
+    assert result.data is not None and Path(result.data["path"]).is_file()
+
+
+async def test_browser_close_shuts_the_session(tmp_path):
+    browser = FakeBrowser()
+    await build_executor(FakeDesktopController(), _settings(tmp_path), browser=browser).execute(
+        _intent(IntentType.BROWSER_CLOSE, target=None)
+    )
+
+    assert browser.closed is True
+
+
+async def test_a_browser_command_without_the_browser_is_blocked(tmp_path):
+    """A desktop-only executor refuses browser commands cleanly."""
+    result = await build_executor(FakeDesktopController(), _settings(tmp_path)).execute(
+        _intent(IntentType.BROWSE, "example.com")
+    )
+
+    assert result.status is CommandStatus.BLOCKED
+    assert "Browser" in result.message
+
+
 @pytest.mark.parametrize(
     ("target", "expected"),
     [("play", ("media_control", "play")), ("pause", ("media_control", "pause"))],

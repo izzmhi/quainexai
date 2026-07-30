@@ -54,6 +54,7 @@ from quainex.config.settings import AIProviderName, Settings, get_settings
 from quainex.core.agent import AutonomousAgent
 from quainex.core.automation import WindowsDesktopController
 from quainex.core.brain import Brain
+from quainex.core.browser import BrowserSession
 from quainex.core.commands import CommandExecutor, build_executor
 from quainex.core.conversation import Conversationalist
 from quainex.core.devtools import CodeAssistant, DevRunner
@@ -153,6 +154,7 @@ class Container:
         dev: Runs allowlisted development operations.
         code: AI-backed code explanation, review and generation.
         conversation: Replies for questions, greetings and unrecognised requests.
+        browser: A steerable web browser, opened on first use.
         vision: Screen and document understanding.
         plugins: Discovers and dispatches to installed plugins.
         agent: Plans and carries out goals within a budget.
@@ -176,6 +178,7 @@ class Container:
     dev: DevRunner
     code: CodeAssistant
     conversation: Conversationalist
+    browser: BrowserSession
     vision: ScreenAnalyst
     plugins: PluginRegistry
     agent: AutonomousAgent
@@ -251,6 +254,10 @@ class Container:
         database = Database.create(resolved)
         memory = MemoryManager(SqlAlchemyMemoryStore(database), resolved)
         conversation = Conversationalist(ai_provider, resolved, memory)
+        # Constructed but not launched: the browser opens on the first "browse"
+        # command and is torn down on shutdown, so a session that never browses
+        # pays nothing.
+        browser = BrowserSession(resolved)
 
         commands = build_executor(
             desktop=desktop,
@@ -260,6 +267,7 @@ class Container:
             code=code,
             vision=vision,
             conversation=conversation,
+            browser=browser,
         )
 
         tokens = (
@@ -328,6 +336,7 @@ class Container:
             dev=dev,
             code=code,
             conversation=conversation,
+            browser=browser,
             vision=vision,
             plugins=plugins,
             agent=agent,
@@ -602,6 +611,7 @@ class Container:
         """
         await self.stop_telegram()
         await self.stop_listener()
+        await self.browser.close()
         await self.ai_provider.aclose()
         await self.database.aclose()
         self.logger.info("container_closed")

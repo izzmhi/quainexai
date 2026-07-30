@@ -123,6 +123,26 @@ _MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 #: four keeps it continuous without hammering the API.
 _TYPING_REFRESH_SECONDS = 4.0
 
+#: Browser intents each produce a screenshot of the page.
+_BROWSER_IMAGE_INTENTS: frozenset[IntentType] = frozenset(
+    {
+        IntentType.BROWSE,
+        IntentType.BROWSER_SCROLL,
+        IntentType.BROWSER_CLICK,
+        IntentType.BROWSER_TYPE,
+        IntentType.BROWSER_BACK,
+    }
+)
+
+#: Intents that always send their image, regardless of the send-images switch —
+#: the user asked to see this specific thing (a page, a panic photo).
+_ALWAYS_SEND_IMAGE: frozenset[IntentType] = frozenset({IntentType.PANIC}) | _BROWSER_IMAGE_INTENTS
+
+#: Every intent whose successful result carries an image to upload.
+_IMAGE_INTENTS: frozenset[IntentType] = (
+    frozenset({IntentType.SCREENSHOT, IntentType.WEBCAM}) | _ALWAYS_SEND_IMAGE
+)
+
 
 class TelegramUpdate(BaseModel):
     """One update from Telegram, reduced to what the bridge uses.
@@ -640,21 +660,13 @@ class TelegramBridge:
             intent: What was asked for.
             result: What happened, carrying the saved path.
         """
-        if (
-            intent.intent
-            not in {
-                IntentType.SCREENSHOT,
-                IntentType.WEBCAM,
-                IntentType.PANIC,
-            }
-            or not result.ok
-        ):
+        if intent.intent not in _IMAGE_INTENTS or not result.ok:
             return
-        # Panic overrides the screenshot switch on purpose: a stolen-laptop photo is
-        # the entire point of triggering it, so it is not the moment to honour a
-        # "don't send images" preference. Screenshots and ordinary webcam shots
-        # still respect the switch.
-        if intent.intent is not IntentType.PANIC and not self._settings.telegram_send_screenshots:
+        # These always carry a screenshot the user explicitly asked to see — a
+        # browsed page, or a panic photo — so gating them behind the send-images
+        # switch would make the feature silently do nothing. Screenshots and
+        # ordinary webcam shots still respect the switch.
+        if intent.intent not in _ALWAYS_SEND_IMAGE and not self._settings.telegram_send_screenshots:
             return
 
         path_value = (result.data or {}).get("path")

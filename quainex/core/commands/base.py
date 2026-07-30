@@ -40,6 +40,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent, IntentType
+    from quainex.core.browser import BrowserSession
     from quainex.core.conversation import Conversationalist
     from quainex.core.devtools.assistant import CodeAssistant
     from quainex.core.devtools.runner import DevRunner
@@ -107,6 +108,7 @@ class CommandContext:
         vision: Screen and document understanding, when configured.
         conversation: Replies for the intents that are not machine actions, when
             configured.
+        browser: A steerable web browser, when configured.
     """
 
     desktop: DesktopController
@@ -114,6 +116,7 @@ class CommandContext:
     code: CodeAssistant | None = None
     vision: ScreenAnalyst | None = None
     conversation: Conversationalist | None = None
+    browser: BrowserSession | None = None
 
 
 #: A command implementation: given the context and the intent, do the thing and

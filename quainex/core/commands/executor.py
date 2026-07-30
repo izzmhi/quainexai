@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from quainex.config.settings import Settings
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent
+    from quainex.core.browser import BrowserSession
     from quainex.core.conversation import Conversationalist
     from quainex.core.devtools.assistant import CodeAssistant
     from quainex.core.devtools.runner import DevRunner
@@ -365,6 +366,7 @@ def build_executor(
     code: CodeAssistant | None = None,
     vision: ScreenAnalyst | None = None,
     conversation: Conversationalist | None = None,
+    browser: BrowserSession | None = None,
 ) -> CommandExecutor:
     """Assemble a registry of built-in commands and an executor over it.
 
@@ -381,6 +383,7 @@ def build_executor(
         code: Optional AI code assistant.
         vision: Optional screen and document analyst.
         conversation: Optional conversational responder.
+        browser: Optional steerable web browser.
 
     Returns:
         A ready-to-use executor.
@@ -388,7 +391,12 @@ def build_executor(
     return CommandExecutor(
         registry=CommandRegistry(build_commands(settings)),
         context=CommandContext(
-            desktop=desktop, dev=dev, code=code, vision=vision, conversation=conversation
+            desktop=desktop,
+            dev=dev,
+            code=code,
+            vision=vision,
+            conversation=conversation,
+            browser=browser,
         ),
         settings=settings,
         confirmations=confirmations,
