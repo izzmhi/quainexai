@@ -1116,6 +1116,28 @@ input[type="text"].field:focus {
   border-top: 1px solid var(--line-soft);
 }
 
+/* ---- Hands-free bar. Sits under the core because turning an open microphone on
+   or off should never require finding a settings tab. */
+
+.listener {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.listener .muted {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+[data-bind="listenerButton"][data-on="true"] {
+  color: var(--good);
+  border-color: var(--good);
+}
+
 /* ---- Speech toggle. The waves fade rather than vanish when muted: an icon that
    loses half its shape reads as a different icon. */
 

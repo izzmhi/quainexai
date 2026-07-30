@@ -561,6 +561,110 @@ async function acceptConfirm() {
 
 /* --------------------------------------------------------------------- mic */
 
+/** Sample rate Whisper works in natively; anything else it resamples anyway. */
+const WAV_SAMPLE_RATE = 16000;
+
+/** Below this many samples there is no speech, only a click. */
+const MIN_SAMPLES = WAV_SAMPLE_RATE / 4;
+
+/**
+ * Convert recorded audio into a 16-bit mono WAV.
+ *
+ * **Why not just upload what MediaRecorder produced.** It produces a *streaming*
+ * WebM container with no duration and no cues, and a short recording can be
+ * little more than headers. FFmpeg — which faster-whisper decodes through —
+ * rejects that with `[Errno 541478725] End of file`, an error that names the
+ * symptom and nothing else. Uploading WebM meant the mic worked or failed
+ * depending on how long the button was held.
+ *
+ * Decoding here removes the ambiguity entirely: the browser already has a
+ * decoder, `AudioContext` will happily read its own recording, and a WAV is the
+ * one format nothing argues about. It also means an unusable recording is caught
+ * *before* a round trip, and reported as "too short" rather than as a decoder
+ * error.
+ *
+ * Mono at 16 kHz because that is what Whisper resamples to regardless — sending
+ * stereo at 48 kHz is nine times the bytes for identical output.
+ *
+ * @param {Blob} blob The recorded audio.
+ * @returns {Promise<Blob>} A `audio/wav` blob.
+ * @throws {Error} The recording could not be decoded, or held no audio.
+ */
+async function toWavBlob(blob) {
+  const bytes = await blob.arrayBuffer();
+  if (bytes.byteLength === 0) throw new Error("The recording was empty.");
+
+  // OfflineAudioContext resamples during decode, so this is one step rather than
+  // decode-then-resample.
+  const context = new AudioContext();
+  let decoded;
+  try {
+    decoded = await context.decodeAudioData(bytes);
+  } catch {
+    throw new Error("That recording could not be decoded. Try holding the mic longer.");
+  } finally {
+    void context.close();
+  }
+
+  const resampler = new OfflineAudioContext(
+    1,
+    Math.ceil((decoded.duration * WAV_SAMPLE_RATE) || 1),
+    WAV_SAMPLE_RATE,
+  );
+  const source = resampler.createBufferSource();
+  source.buffer = decoded;
+  source.connect(resampler.destination);
+  source.start();
+  const mono = await resampler.startRendering();
+
+  const samples = mono.getChannelData(0);
+  if (samples.length < MIN_SAMPLES) {
+    throw new Error("That was too short to contain speech.");
+  }
+
+  return new Blob([encodeWav(samples)], { type: "audio/wav" });
+}
+
+/**
+ * Encode float samples as a 16-bit PCM WAV.
+ *
+ * @param {Float32Array} samples Mono samples in the range -1..1.
+ * @returns {ArrayBuffer} A complete WAV file, header included.
+ */
+function encodeWav(samples) {
+  const bytesPerSample = 2;
+  const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+  const view = new DataView(buffer);
+
+  const writeText = (offset, text) => {
+    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+  };
+
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+  writeText(8, "WAVE");
+  writeText(12, "fmt ");
+  view.setUint32(16, 16, true); // PCM header length
+  view.setUint16(20, 1, true); // PCM, uncompressed
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, WAV_SAMPLE_RATE, true);
+  view.setUint32(28, WAV_SAMPLE_RATE * bytesPerSample, true); // byte rate
+  view.setUint16(32, bytesPerSample, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeText(36, "data");
+  view.setUint32(40, samples.length * bytesPerSample, true);
+
+  let offset = 44;
+  for (const sample of samples) {
+    // Clamp before scaling: a value outside -1..1 wraps rather than clips, which
+    // turns a loud moment into a burst of noise.
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(offset, clamped * 0x7fff, true);
+    offset += bytesPerSample;
+  }
+  return buffer;
+}
+
 /**
  * Start recording from the browser's microphone.
  *
@@ -595,8 +699,18 @@ async function startRecording() {
     }
 
     core.set("thinking", "Transcribing what you said.");
+
+    let wav;
+    try {
+      wav = await toWavBlob(new Blob(chunks, { type: recorder.mimeType }));
+    } catch (error) {
+      core.set("idle", "That recording was too short to make out.");
+      toast(error.message, "bad");
+      return;
+    }
+
     const form = new FormData();
-    form.append("audio", new Blob(chunks, { type: recorder.mimeType }), "recording.webm");
+    form.append("audio", wav, "recording.wav");
     try {
       const transcript = await api("/voice/transcribe", { method: "POST", form });
       const text = (transcript.text ?? "").trim();
@@ -1156,6 +1270,76 @@ function openLink() {
   }, 20000);
 }
 
+/* -------------------------------------------------------------- hands-free */
+
+/** Fetch and render the wake-word listener's state. */
+async function loadListener() {
+  try {
+    renderListener(await api("/voice/listener"));
+  } catch {
+    // The console is still fully usable by keyboard and mic without this, so a
+    // failure here is not worth a toast on every page load.
+  }
+}
+
+/**
+ * Render the hands-free control.
+ *
+ * @param {object} state The `/voice/listener` payload.
+ */
+function renderListener(state) {
+  const button = bind("listenerButton");
+  const detail = bind("listenerDetail");
+  if (!button) return;
+
+  if (!state.available) {
+    button.disabled = true;
+    button.textContent = "Hands-free: unavailable";
+    if (detail) detail.textContent = 'Needs the voice extra: pip install -e ".[voice]"';
+    return;
+  }
+
+  button.disabled = false;
+  button.dataset.on = String(state.running);
+  button.textContent = state.running ? "Hands-free: ON" : "Hands-free: off";
+
+  if (!detail) return;
+  detail.textContent = state.running
+    ? // Heard vs acted-on is the honest measure: a wide gap means the wake gate is
+      // hearing the room and correctly ignoring it.
+      `Say "${state.wake_word}, …" — the mic is open. Heard ${state.utterances_heard}, acted on ${state.requests_acted_on}.`
+    : `Off. The microphone is closed. Turn on to say "${state.wake_word}" instead of holding the mic.`;
+}
+
+/** Turn hands-free listening on or off. */
+async function toggleListener() {
+  const button = bind("listenerButton");
+  const turningOn = button?.dataset.on !== "true";
+
+  if (turningOn) {
+    // Asked rather than assumed. Opening a microphone indefinitely on a machine
+    // that may be in a shared room is not something to do on a single click
+    // without saying what it means.
+    const agreed = window.confirm(
+      "Turn on hands-free listening?\n\n" +
+        "The microphone stays open. Speech is transcribed on this machine and " +
+        "discarded unless it starts with the wake word — nothing is uploaded and " +
+        "nothing is stored.\n\n" +
+        "Other people in the room have not agreed to this.",
+    );
+    if (!agreed) return;
+  }
+
+  if (button) button.disabled = true;
+  try {
+    renderListener(await api(`/voice/listener/${turningOn ? "start" : "stop"}`, { method: "POST" }));
+    toast(turningOn ? "Listening. Say the wake word." : "Microphone released.", "good");
+  } catch (error) {
+    toast(error.message, "bad");
+    if (button) button.disabled = false;
+  }
+}
+
 /* ------------------------------------------------------------------ speech */
 
 /** Where the preference lives. Persistent, unlike the access token. */
@@ -1251,6 +1435,9 @@ function boot() {
   }
 
   document.querySelector('[data-action="speech"]')?.addEventListener("click", toggleSpeech);
+  document
+    .querySelector('[data-action="listener-toggle"]')
+    ?.addEventListener("click", toggleListener);
   document.querySelector('[data-action="theme"]')?.addEventListener("click", toggleTheme);
   document.querySelector('[data-action="refresh-history"]')?.addEventListener("click", loadHistory);
   document
@@ -1298,10 +1485,14 @@ function boot() {
   core.start();
   navigate("console");
   void refreshHealth();
+  void loadListener();
   openLink();
   // Slow poll: uptime and provider availability change on the scale of minutes,
   // and the settings panel refreshes health directly after any change.
   setInterval(refreshHealth, 30000);
+  // Slower than health: the counters only move when someone speaks, and this
+  // is the one poll that reflects whether a microphone is open.
+  setInterval(loadListener, 15000);
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

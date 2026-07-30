@@ -311,6 +311,21 @@ class Settings(BaseSettings):
     wake_word_similarity: float = Field(default=0.75, ge=0.0, le=1.0)
     voice_require_wake_word: bool = True
 
+    # Hold the microphone open continuously and act on anything beginning with the
+    # wake word.
+    #
+    # **Off by default, and that is a decision rather than caution.** This opens the
+    # microphone indefinitely. Speech is transcribed locally and discarded unless it
+    # was addressed to Quainex — nothing is uploaded, nothing is stored — but "the
+    # mic is open" is a fact about the room, and other people in it have not agreed
+    # to anything. An assistant that started listening because a default said
+    # `true` would be a different kind of product.
+    #
+    # Costs no API tokens while idle: the wake gate returns before the Brain is
+    # called, so ambient conversation is heard, discarded, and never leaves the
+    # machine.
+    voice_always_listening: bool = False
+
     # Recording bounds. `max_seconds` caps a microphone stuck open; recording
     # normally ends earlier, once speech is followed by `silence_seconds` of quiet.
     voice_max_seconds: float = Field(default=15.0, gt=0)

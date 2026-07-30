@@ -5,6 +5,7 @@ that joins recognition to the Brain, the command executor and speech output.
 """
 
 from quainex.core.voice.audio import AudioRecorder, MicrophoneRecorder
+from quainex.core.voice.listener import WakeWordListener
 from quainex.core.voice.session import (
     VoiceSession,
     VoiceTurn,
@@ -21,6 +22,7 @@ __all__ = [
     "Transcript",
     "VoiceSession",
     "VoiceTurn",
+    "WakeWordListener",
     "WakeWordMatch",
     "detect_wake_word",
 ]

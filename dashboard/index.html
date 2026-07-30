@@ -93,6 +93,18 @@
 
         <p class="stage-state" data-bind="stateLabel">Standing by</p>
         <p class="stage-hint" data-bind="stateHint">Type below, or press and hold the mic.</p>
+
+        <!--
+          Hands-free mode. Deliberately a button on the main panel rather than a
+          setting buried in a tab: it opens the microphone indefinitely, so turning
+          it on should be a visible act and turning it off should be one click.
+        -->
+        <div class="listener" data-bind="listenerBar">
+          <button class="ghost" data-action="listener-toggle" data-bind="listenerButton">
+            Hands-free: off
+          </button>
+          <span class="muted" data-bind="listenerDetail"></span>
+        </div>
       </section>
 
       <section class="transcript" data-bind="transcript" aria-live="polite" aria-label="Conversation">

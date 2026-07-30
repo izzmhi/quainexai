@@ -61,7 +61,12 @@ from quainex.core.exceptions import ConfigurationError, FeatureNotConfiguredErro
 from quainex.core.logging import configure_logging, get_logger
 from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
 from quainex.core.speech import WindowsSapiTTS
-from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSession
+from quainex.core.voice import (
+    FasterWhisperSTT,
+    MicrophoneRecorder,
+    VoiceSession,
+    WakeWordListener,
+)
 from quainex.database.engine import Database
 from quainex.integrations import TelegramBridge
 from quainex.plugins import PluginRegistry
@@ -152,6 +157,8 @@ class Container:
         plugins: Discovers and dispatches to installed plugins.
         agent: Plans and carries out goals within a budget.
         telegram: Phone bridge. Constructed always, polls only when started.
+        listener: Always-on wake-word listener. Constructed always, holds the
+            microphone only when started.
     """
 
     settings: Settings
@@ -173,11 +180,14 @@ class Container:
     plugins: PluginRegistry
     agent: AutonomousAgent
     telegram: TelegramBridge
+    listener: WakeWordListener
     #: Settings before vault credentials were overlaid. Kept so a reload can
     #: re-derive from the original source rather than compounding overlays.
     _base_settings: Settings | None = None
     #: Handle on the polling task, so shutdown can cancel it.
     _telegram_task: asyncio.Task[None] | None = None
+    #: Handle on the listening task, so shutdown releases the microphone.
+    _listener_task: asyncio.Task[None] | None = None
 
     @property
     def base_settings(self) -> Settings:
@@ -286,6 +296,7 @@ class Container:
             settings=resolved,
             memory=memory,
         )
+        listener = WakeWordListener(voice=voice, settings=resolved)
         telegram = TelegramBridge(
             resolved, brain=brain, commands=commands, voice=voice, memory=memory
         )
@@ -321,6 +332,7 @@ class Container:
             plugins=plugins,
             agent=agent,
             telegram=telegram,
+            listener=listener,
             _base_settings=base,
         )
 
@@ -338,6 +350,16 @@ class Container:
             # is kept so shutdown can cancel it rather than leaking the task.
             self._telegram_task = asyncio.create_task(self.telegram.run())
             self.logger.info("telegram_autostarted")
+
+        if self.settings.voice_always_listening and self.voice.is_available:
+            # Same fire-and-forget shape, and the same reason: the listener runs
+            # until stopped. Gated on `is_available` so a machine without the
+            # voice extra installed starts normally instead of failing.
+            self._listener_task = asyncio.create_task(self.listener.run())
+            self.logger.warning(
+                "wake_word_listener_autostarted",
+                detail="The microphone is open. Set QUAINEX_VOICE_ALWAYS_LISTENING=false to stop.",
+            )
 
     @staticmethod
     def _apply_vault(settings: Settings, vault: CredentialVault) -> Settings:
@@ -404,6 +426,35 @@ class Container:
             self.ai_provider = chain
 
         self.logger.info("ai_providers_reloaded", chain=self.ai_provider.name)
+
+    async def start_listener(self) -> None:
+        """Begin always-on wake-word listening.
+
+        Raises:
+            SpeechUnavailableError: There is no microphone or no recogniser.
+        """
+        if self.listener.is_running:
+            return
+        # Armed synchronously so that a missing microphone raises *here*, to the
+        # caller, rather than inside a background task where nobody sees it — and so
+        # the status returned immediately afterwards is already accurate.
+        self.listener.arm()
+        # Started here rather than in the route for the same reason as Telegram: the
+        # container owns the handle, so shutdown can cancel it. A task created in a
+        # request handler is a task nobody can stop — and this one holds a
+        # microphone.
+        self._listener_task = asyncio.create_task(self.listener.run())
+
+    async def stop_listener(self) -> None:
+        """Stop listening and release the microphone."""
+        self.listener.stop()
+        if self._listener_task is not None:
+            # Awaited rather than merely cancelled: the current cycle owns an open
+            # audio stream, and abandoning the task would leave the device held.
+            self._listener_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._listener_task
+            self._listener_task = None
 
     async def reload_telegram(self) -> None:
         """Rebuild the Telegram bridge from the vault, without a restart.
@@ -550,6 +601,7 @@ class Container:
         Called from the application's shutdown hook. Safe to call more than once.
         """
         await self.stop_telegram()
+        await self.stop_listener()
         await self.ai_provider.aclose()
         await self.database.aclose()
         self.logger.info("container_closed")

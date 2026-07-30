@@ -103,6 +103,59 @@ async def voice_status(container: ContainerDep) -> dict[str, object]:
     return container.voice.status()
 
 
+@router.get("/listener", summary="Report always-on wake-word listening state")
+async def listener_status(container: ContainerDep) -> dict[str, object]:
+    """Report whether Quainex is listening for its name.
+
+    Includes ``utterances_heard`` against ``requests_acted_on``, which is the
+    honest measure of whether the wake gate is doing its job: a large gap means
+    Quainex is hearing the room and correctly ignoring it.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        Listener availability, run state and counters.
+    """
+    return container.listener.status()
+
+
+@router.post("/listener/start", summary="Start listening for the wake word")
+async def listener_start(container: ContainerDep) -> dict[str, object]:
+    """Open the microphone and listen continuously.
+
+    Speech is transcribed on this machine and discarded unless it begins with the
+    wake word, so ambient conversation costs no API tokens and never leaves the
+    machine. It is still an open microphone, which is why this is an explicit
+    action rather than a default.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        Listener state after starting.
+
+    Raises:
+        SpeechUnavailableError: There is no microphone or no recogniser.
+    """
+    await container.start_listener()
+    return container.listener.status()
+
+
+@router.post("/listener/stop", summary="Stop listening and release the microphone")
+async def listener_stop(container: ContainerDep) -> dict[str, object]:
+    """Stop listening.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        Listener state after stopping.
+    """
+    await container.stop_listener()
+    return container.listener.status()
+
+
 @router.post(
     "/transcribe",
     response_model=Transcript,
