@@ -158,6 +158,50 @@ def test_near_misses_still_wake_it(misheard):
 
 
 @pytest.mark.parametrize(
+    ("said", "expected_command"),
+    [
+        # The exact output of a real end-to-end run. Windows TTS said "Quainex,
+        # take a screenshot" and faster-whisper returned this, splitting the name
+        # across two tokens.
+        ("Quain X. Take a screenshot.", "Take a screenshot."),
+        ("Quain ex open notepad", "open notepad"),
+        ("Quain nex lock the screen", "lock the screen"),
+        ("Hey Quain X open vs code", "open vs code"),
+    ],
+)
+def test_a_name_split_across_tokens_is_fully_consumed(said, expected_command):
+    """Found by actually running Whisper, not by reasoning about it.
+
+    "Quain" alone scores 0.83, so the matcher stopped there and left "X." at the
+    front of the command. That request still worked — "X. Take a screenshot." is
+    unambiguous — but "Quain X. open Notepad" is the shape where a stray leading
+    token gets absorbed into the extracted target.
+    """
+    match = detect_wake_word(said, "quainex", 0.75)
+
+    assert match.detected is True
+    assert match.command == expected_command
+
+
+@pytest.mark.parametrize(
+    ("said", "expected_command"),
+    [
+        # The fragment limit earning its place: joining greedily would make this
+        # "quainexport" (0.78, over threshold) and eat a real word.
+        ("Quain export the file", "export the file"),
+        ("Quainex export the file", "export the file"),
+        ("Quainex extract the archive", "extract the archive"),
+    ],
+)
+def test_joining_never_swallows_a_real_word(said, expected_command):
+    """A split name leaves a stub behind, never a whole word."""
+    match = detect_wake_word(said, "quainex", 0.75)
+
+    assert match.detected is True
+    assert match.command == expected_command
+
+
+@pytest.mark.parametrize(
     "said",
     [
         "",

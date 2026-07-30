@@ -153,7 +153,17 @@ class Settings(BaseSettings):
     # its base URL is fixed and known, so requiring the user to also supply a URL
     # would make a pasted key silently do nothing.
     openrouter_api_key: SecretStr | None = None
-    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # Verified working, including structured output, rather than chosen from a
+    # blog post: the previous default (`meta-llama/llama-3.3-70b-instruct:free`)
+    # had quietly lost its free tier and returned 404 with "the paid version is
+    # available now", which is why this one was checked against the live API
+    # before being set.
+    #
+    # Free slugs come and go. `openrouter/free` auto-routes among whatever is free
+    # and so cannot go stale, but it gives no guarantee about which model answers —
+    # and the Brain needs dependable JSON. Browse the current list at
+    # https://openrouter.ai/models?max_price=0
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # --- Local / self-hosted (Ollama, LM Studio) -------------------------

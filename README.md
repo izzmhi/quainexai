@@ -64,6 +64,22 @@ Kept optional deliberately — Whisper weights are a large first-run download, a
 Quainex runs fine by text without them. Speech *output* needs no download at all,
 so it works either way. `GET /voice/status` reports each component separately.
 
+**To prove recognition actually works on your machine:**
+
+```powershell
+.\scripts\verify_whisper.ps1
+```
+
+The voice test suite is entirely fakes, deliberately, so `pytest` never opens a
+microphone or downloads a model. The cost is that nothing in CI proves
+faster-whisper can load a model and produce a transcript. This script closes that
+gap and needs no microphone: Windows' own synthesiser speaks a known phrase and
+the transcript is checked against it.
+
+That script is how the wake-word split bug was found. Real output for *"Quainex,
+take a screenshot"* is **`Quain X. Take a screenshot.`** — the recogniser breaks
+the invented name in two, and the matcher used to strip only the first half.
+
 ## What it can do today
 
 ```powershell

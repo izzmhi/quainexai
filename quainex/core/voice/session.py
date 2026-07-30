@@ -83,6 +83,15 @@ _PHONETIC_FOLDINGS: tuple[tuple[str, str], ...] = (
 )
 
 
+#: Longest trailing fragment that may be joined to a candidate wake word.
+#:
+#: When the recogniser splits the name it leaves a stub — "Quain X", "Quain ex",
+#: "Quain nex" — never a whole word. Three characters admits every observed stub
+#: and excludes real words, which matters because joining greedily would let
+#: "Quain export the file" match as "quainexport" and swallow "export".
+_MAX_SPLIT_FRAGMENT = 3
+
+
 def _fold_phonetics(word: str) -> str:
     """Normalise spellings that sound the same.
 
@@ -95,6 +104,31 @@ def _fold_phonetics(word: str) -> str:
     for variant, canonical in _PHONETIC_FOLDINGS:
         word = word.replace(variant, canonical)
     return word
+
+
+def _alnum(word: str) -> str:
+    """Reduce a token to lower-case letters and digits.
+
+    Args:
+        word: A raw token from the transcript.
+
+    Returns:
+        The token without punctuation the recogniser added.
+    """
+    return "".join(character for character in word.lower() if character.isalnum())
+
+
+def _similarity(candidate: str, folded_target: str) -> float:
+    """Score a candidate against the folded wake word.
+
+    Args:
+        candidate: An alphanumeric, lower-cased candidate.
+        folded_target: The wake word, already phonetically folded.
+
+    Returns:
+        A ratio from 0 to 1.
+    """
+    return difflib.SequenceMatcher(None, _fold_phonetics(candidate), folded_target).ratio()
 
 
 class WakeWordMatch(BaseModel):
@@ -150,17 +184,37 @@ def detect_wake_word(text: str, wake_word: str, similarity: float) -> WakeWordMa
 
     for index, word in enumerate(words[:_WAKE_SCAN_WORDS]):
         # Strip punctuation the recogniser added: "Quainex," should still match.
-        cleaned = "".join(character for character in word.lower() if character.isalnum())
+        cleaned = _alnum(word)
         if not cleaned:
             continue
-        ratio = difflib.SequenceMatcher(None, _fold_phonetics(cleaned), target).ratio()
+
+        ratio = _similarity(cleaned, target)
+        consumed = 1
+
+        # The recogniser splits an invented proper noun across tokens. Real
+        # observed output for "Quainex, take a screenshot" is "Quain X. Take a
+        # screenshot." — "Quain" alone already scores 0.83, so the loop matched,
+        # stopped, and left "X." at the front of the command. The Brain absorbed it
+        # that time; "Quain X. open Notepad" is the case where a stray token
+        # becomes part of the extracted target.
+        #
+        # So the join is tried too, and wins only when it genuinely fits better.
+        if index + 1 < len(words) and (tail := _alnum(words[index + 1])):
+            # Bounded to a short fragment. Without the limit, "Quain export the
+            # file" would join to "quainexport", score 0.78, and eat a real word —
+            # a split name leaves a stub behind, not a whole one.
+            if len(tail) <= _MAX_SPLIT_FRAGMENT:
+                joined = _similarity(cleaned + tail, target)
+                if joined > ratio:
+                    ratio, consumed = joined, 2
+
         if ratio >= similarity:
-            remainder = " ".join(words[index + 1 :]).strip()
+            remainder = " ".join(words[index + consumed :]).strip()
             # Drop a leading comma left behind by "Quainex, open VS Code".
             return WakeWordMatch(
                 detected=True,
                 command=remainder.lstrip(",.: ").strip(),
-                matched_word=word,
+                matched_word=" ".join(words[index : index + consumed]),
             )
 
     return WakeWordMatch(detected=False, command=text.strip())

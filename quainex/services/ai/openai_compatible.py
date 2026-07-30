@@ -297,7 +297,16 @@ class OpenAICompatibleProvider:
             ) from exc
 
         if not text:
-            raise ProviderError(f"{self._name} returned an empty reply.")
+            # Name the usual cause. On a reasoning model the token budget funds the
+            # thinking as well as the answer, so too small a cap produces a
+            # perfectly successful call with nothing visible in it — which reads as
+            # a broken model unless the message says otherwise.
+            budget = max_tokens or self._max_tokens
+            raise ProviderError(
+                f"{self._name} returned an empty reply. If this is a reasoning "
+                f"model, {budget} tokens may all have gone on reasoning before any "
+                f"answer was produced — try raising the cap."
+            )
 
         _log.info("chat_response", provider=self._name, characters=len(text))
         return text

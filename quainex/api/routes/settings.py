@@ -514,7 +514,14 @@ async def test_providers(container: ContainerDep) -> TestResult:
         reply = await container.ai_provider.complete(
             messages=[ChatMessage(role="user", content="Reply with exactly: ready")],
             system="You are being health-checked. Answer in one word.",
-            max_tokens=32,
+            # No cap. A one-word answer looks like it needs 32 tokens, and that is
+            # exactly what this used to ask for — but on a reasoning model the
+            # budget funds the thinking as well, so 32 was spent before any visible
+            # text was produced. The provider then reported "empty reply" and the
+            # dashboard called a perfectly good key broken.
+            #
+            # A false negative here is worse than a slow check: it is the kind that
+            # gets a working key deleted. Each provider's own cap applies instead.
         )
     except ProviderError as exc:
         return TestResult(ok=False, provider=container.ai_provider.name, error=exc.message)
