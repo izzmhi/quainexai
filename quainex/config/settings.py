@@ -202,6 +202,18 @@ class Settings(BaseSettings):
     # for the large default above does not apply to them.
     ai_max_tokens_free_tier: int = Field(default=1536, ge=1)
 
+    # Cap for intent classification specifically.
+    #
+    # The output is a five-field JSON object, so this is what the task actually
+    # needs — and because free tiers meter *requested* tokens, the unused
+    # remainder of a larger cap is charged against the quota regardless. Sizing
+    # this to the job rather than to prose is the cheapest available multiplier on
+    # how many commands a day fit inside a free tier.
+    #
+    # Not smaller: a reasoning model funds its thinking from the same budget, and
+    # starving it produces an empty reply rather than a terse one.
+    ai_max_tokens_classification: int = Field(default=768, ge=1)
+
     # --- Brain -----------------------------------------------------------
     # Classifications below this confidence still return their best guess, but
     # are flagged as needing user confirmation before Phase 3 acts on them.

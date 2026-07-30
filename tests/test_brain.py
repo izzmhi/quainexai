@@ -21,6 +21,15 @@ from quainex.services.ai.provider import AIProvider, ChatMessage
 if TYPE_CHECKING:
     from fastapi.testclient import TestClient
 
+#: An utterance the local fast path deliberately declines, so the model path is
+#: the one under test.
+#:
+#: Needed once ``classify_locally`` existed: these tests were written against
+#: "Open VS Code", which is now answered locally for nothing — so the fake provider
+#: was never reached and five tests failed while the code was working correctly.
+#: A test of the expensive path has to ask for something that genuinely needs it.
+NEEDS_MODEL = "bring up my editor"
+
 
 class FakeProvider:
     """An ``AIProvider`` that returns a canned classification and records inputs."""
@@ -37,6 +46,7 @@ class FakeProvider:
         self.calls = 0
         self.last_messages: list[ChatMessage] = []
         self.last_system: str | None = None
+        self.last_max_tokens: int | None = None
 
     @property
     def name(self) -> str:
@@ -66,6 +76,7 @@ class FakeProvider:
         self.calls += 1
         self.last_messages = messages
         self.last_system = system
+        self.last_max_tokens = max_tokens
         if self._error is not None:
             raise self._error
         assert self._classification is not None
@@ -112,7 +123,7 @@ def test_fake_provider_satisfies_the_protocol():
 
 async def test_clear_command_is_classified_and_needs_no_confirmation(tmp_path):
     provider = FakeProvider(_classification())
-    intent = await _brain(provider, tmp_path).interpret("Open VS Code")
+    intent = await _brain(provider, tmp_path).interpret(NEEDS_MODEL)
 
     assert intent.intent is IntentType.OPEN_APPLICATION
     assert intent.target == "VS Code"
@@ -123,12 +134,12 @@ async def test_clear_command_is_classified_and_needs_no_confirmation(tmp_path):
 
 async def test_system_prompt_and_utterance_are_sent(tmp_path):
     provider = FakeProvider(_classification())
-    await _brain(provider, tmp_path).interpret("  Open VS Code  ")
+    await _brain(provider, tmp_path).interpret(f"  {NEEDS_MODEL}  ")
 
     assert provider.last_system is not None
     assert "Intent catalogue" in provider.last_system
     # The utterance is trimmed before it is sent.
-    assert provider.last_messages[-1].content == "Open VS Code"
+    assert provider.last_messages[-1].content == NEEDS_MODEL
     assert provider.last_messages[-1].role == "user"
 
 
@@ -145,6 +156,74 @@ async def test_parameters_round_trip_to_a_dict(tmp_path):
     )
     intent = await _brain(provider, tmp_path).interpret("Copy hello to my clipboard")
     assert intent.parameters_as_dict() == {"action": "write", "text": "hello"}
+
+
+# -- the local fast path ---------------------------------------------------
+
+
+async def test_a_common_command_never_reaches_the_provider(tmp_path):
+    """The point of the fast path, asserted on the provider rather than the result.
+
+    Getting the right answer is not the claim being made here; getting it without
+    spending roughly 1,650 prompt tokens is.
+    """
+    provider = FakeProvider(_classification())
+
+    intent = await _brain(provider, tmp_path).interpret("take a screenshot")
+
+    assert provider.calls == 0
+    assert intent.intent is IntentType.SCREENSHOT
+    assert intent.confidence == 1.0
+    assert "no model call" in intent.reasoning
+
+
+async def test_the_utterance_survives_a_local_match(tmp_path):
+    """Conversational handlers and the audit trail both read it."""
+    intent = await _brain(FakeProvider(_classification()), tmp_path).interpret("  Lock the screen ")
+
+    assert intent.utterance == "Lock the screen"
+
+
+async def test_a_local_match_is_not_gated_by_the_confidence_threshold(tmp_path):
+    """A pattern match is certain, so even a strict threshold must not gate it.
+
+    Otherwise raising the threshold would start asking the user to confirm "take a
+    screenshot".
+    """
+    intent = await _brain(FakeProvider(_classification()), tmp_path, threshold=0.99).interpret(
+        "take a screenshot"
+    )
+
+    assert intent.requires_confirmation is False
+
+
+async def test_history_sends_the_request_to_the_model_even_when_it_would_match(tmp_path):
+    """A follow-up is only meaningful in context, and a pattern cannot see context.
+
+    So the presence of history disables the fast path entirely rather than risking
+    a locally-matched answer that ignores what came before.
+    """
+    provider = FakeProvider(_classification())
+
+    await _brain(provider, tmp_path).interpret(
+        "close spotify", history=[ChatMessage(role="user", content="open spotify")]
+    )
+
+    assert provider.calls == 1
+
+
+async def test_classification_asks_for_a_smaller_token_budget_than_prose(tmp_path):
+    """Free tiers meter *requested* tokens, so an oversized cap costs real quota.
+
+    A five-field JSON object does not need the budget that a paragraph does.
+    """
+    provider = FakeProvider(_classification())
+    settings = Settings(_env_file=None, log_dir=tmp_path / "logs")  # type: ignore[call-arg]
+
+    await Brain(provider=provider, settings=settings).interpret(NEEDS_MODEL)
+
+    assert provider.last_max_tokens == settings.ai_max_tokens_classification
+    assert settings.ai_max_tokens_classification < settings.ai_max_tokens
 
 
 # -- confirmation policy ---------------------------------------------------
@@ -276,7 +355,7 @@ async def test_history_is_truncated_to_the_configured_window(tmp_path):
 async def test_provider_errors_propagate(tmp_path):
     provider = FakeProvider(error=ProviderError("upstream exploded"))
     with pytest.raises(ProviderError, match="upstream exploded"):
-        await _brain(provider, tmp_path).interpret("Open VS Code")
+        await _brain(provider, tmp_path).interpret(NEEDS_MODEL)
 
 
 # -- HTTP endpoint ---------------------------------------------------------
@@ -290,7 +369,7 @@ def _install_fake_brain(client: TestClient, provider: FakeProvider) -> None:
 def test_interpret_endpoint_returns_the_intent(client: TestClient):
     _install_fake_brain(client, FakeProvider(_classification()))
 
-    response = client.post("/brain/interpret", json={"utterance": "Open VS Code"})
+    response = client.post("/brain/interpret", json={"utterance": NEEDS_MODEL})
     assert response.status_code == 200
 
     body = response.json()
@@ -331,6 +410,6 @@ def test_malformed_body_uses_the_same_envelope(client: TestClient):
 
 def test_interpret_without_credentials_returns_503(client: TestClient):
     # The default test container has no API key, so the real provider is used.
-    response = client.post("/brain/interpret", json={"utterance": "Open VS Code"})
+    response = client.post("/brain/interpret", json={"utterance": NEEDS_MODEL})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "provider_not_configured"

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from quainex.core.brain.fastpath import classify_locally
 from quainex.core.brain.prompts import SYSTEM_PROMPT
 from quainex.core.brain.schemas import (
     CONFIRMATION_REQUIRED,
@@ -65,6 +66,14 @@ MAX_UTTERANCE_CHARS = 4000
 #: How many prior turns to include as context. Enough to resolve "close it" after
 #: "open Spotify", bounded so cost stays predictable.
 MAX_HISTORY_TURNS = 6
+
+#: Roughly what a model-backed classification costs in prompt tokens, before the
+#: user's own words: the intent catalogue plus the output schema. Logged on a local
+#: match so the saving is visible in the audit trail rather than merely claimed.
+#: An estimate, and labelled as one — the exact figure varies by provider and
+#: tokeniser, and measuring it precisely would mean a tokeniser dependency for a
+#: log line.
+_ESTIMATED_PROMPT_TOKENS = 1650
 
 
 class Brain:
@@ -108,6 +117,22 @@ class Brain:
         """
         cleaned = self._validate(utterance)
 
+        # Free, instant, and correct for the requests people make most often. Only
+        # attempted when there is no history to take into account: "close it"
+        # depends entirely on what came before, and a pattern cannot see that.
+        if not history and (local := classify_locally(cleaned)) is not None:
+            self._log.info(
+                "intent_classified_locally",
+                intent=local.intent.value,
+                target=local.target,
+                tokens_saved=_ESTIMATED_PROMPT_TOKENS,
+            )
+            return Intent(
+                **local.model_dump(),
+                requires_confirmation=self._needs_confirmation(local),
+                utterance=cleaned,
+            )
+
         messages = [
             *(history or [])[-MAX_HISTORY_TURNS:],
             ChatMessage(role="user", content=cleaned),
@@ -117,6 +142,12 @@ class Brain:
             messages=messages,
             output_model=IntentClassification,
             system=SYSTEM_PROMPT,
+            # Classification output is a five-field object — a couple of hundred
+            # tokens at most. The general cap is sized for prose, and on a free
+            # tier metered by *requested* tokens the unused remainder is charged
+            # against the quota anyway. Asking for what this actually needs is the
+            # single cheapest way to multiply how many commands a day fit.
+            max_tokens=self._settings.ai_max_tokens_classification,
         )
 
         intent = Intent(

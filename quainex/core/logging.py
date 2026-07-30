@@ -59,6 +59,28 @@ _LOG_BACKUP_COUNT = 5
 # the *key*, so `api_key`, `ANTHROPIC_API_KEY` and `authorization` all redact.
 _SENSITIVE_KEY_MARKERS = ("key", "token", "secret", "password", "authorization", "credential")
 
+# Keys that contain a marker but hold no secret. Checked first.
+#
+# The substring matching above is deliberately blunt, and it stays that way: a
+# scrubber that misses a real credential is a far worse failure than one that
+# redacts a number. But a blunt rule produces false positives, and a redacted
+# *count* is not defence in depth — it is a log line that tells you nothing.
+# `tokens_saved` was the case that surfaced this: the whole point of logging it is
+# to see the figure, and it arrived as "***REDACTED***".
+#
+# So exemptions are explicit, exact-match, and reviewed one at a time rather than
+# won by loosening the rule. Anything not on this list is still redacted.
+_SAFE_KEYS = frozenset(
+    {
+        "tokens_saved",
+        "max_tokens",
+        "ai_max_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    }
+)
+
 _REDACTED = "***REDACTED***"
 
 # Third-party loggers that are noisy at DEBUG and rarely useful.
@@ -83,6 +105,8 @@ def _redact_sensitive(_logger: WrappedLogger, _name: str, event_dict: EventDict)
     """
     for key in event_dict:
         lowered = key.lower()
+        if lowered in _SAFE_KEYS:
+            continue
         if any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS):
             event_dict[key] = _REDACTED
     return event_dict

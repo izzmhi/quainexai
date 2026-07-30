@@ -14,10 +14,28 @@ under the user's control.
 > orders from a phone over Telegram, runs goals autonomously within a budget, and
 > loads capability-gated plugins.
 
+## Install it properly (recommended)
+
+```powershell
+.\scripts\install_startup.ps1
+```
+
+Quainex then starts when you log in, with no console window, and you reach it from
+anywhere with **`Ctrl+Alt+Q`** or the tray icon. Uninstall with `-Remove`.
+
+Task Scheduler rather than a Windows service, deliberately: a service runs in
+session 0, isolated from your desktop — it could not take a screenshot, read the
+clipboard, launch an application or speak. A logon task runs in your session, as
+you, needs no administrator prompt, and cannot affect anyone else on the machine.
+
+To stop or restart it, use `Stop-ScheduledTask -TaskName "Quainex Server"` rather
+than killing the process. The task restarts a dead process on purpose, so
+`Stop-Process` races the recovery it is there to provide.
+
 ## The interface
 
 ```powershell
-python main.py
+python main.py       # or let the startup task do it
 ```
 
 Then open <http://127.0.0.1:8000/ui/>. Four panels:
@@ -53,6 +71,30 @@ different model the same thing is shopping for a yes, not error recovery.
 
 Reorder with `QUAINEX_AI_PROVIDERS`. An entry with no key is skipped, so an
 unused slot costs nothing.
+
+### The cheapest call is the one that never happens
+
+A model-backed classification costs roughly **1,650 prompt tokens** before your
+words are counted — the intent catalogue plus the output schema. On a free tier
+metered per day that is the difference between a few dozen commands and a few
+hundred.
+
+So the common ones never reach a model at all. `take a screenshot`, `lock the
+screen`, `open notepad`, `volume up`, `what's open` are matched by pattern,
+locally, in microseconds and for nothing. Three consequences:
+
+- **They work with no API key at all** — before you have signed up for anything,
+  when every provider is out of quota, with the network unplugged.
+- **They are instant**, with no round trip.
+- **They cannot be misclassified.** A pattern either matched or it did not.
+
+Nothing destructive is on that path. `shutdown`, `restart` and `sleep` always go
+to a model, because a regex cannot tell that "restart the router" is not about
+this computer. The confirmation gate would probably catch it; "probably caught
+downstream" is not the standard for powering off a machine.
+
+Anything ambiguous, conversational, or carrying context falls through to the
+model, which is what it is for.
 
 ## Optional: voice
 

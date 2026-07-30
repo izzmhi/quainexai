@@ -520,7 +520,24 @@ def test_execute_endpoint_refuses_unconfirmed_with_200(client: TestClient):
 
 
 def test_ask_endpoint_requires_a_configured_brain(client: TestClient):
-    # No API key in the test container, so interpretation cannot happen.
-    response = client.post("/commands/ask", json={"utterance": "Open VS Code"})
+    # No API key in the test container, so interpretation cannot happen — for
+    # anything the local fast path does not already handle.
+    response = client.post("/commands/ask", json={"utterance": "bring up my editor"})
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "provider_not_configured"
+
+
+def test_common_commands_work_with_no_api_key_at_all(client: TestClient):
+    """A property that fell out of the fast path, and is worth keeping on purpose.
+
+    The test container has no credentials, and this still succeeds: the classifier
+    never runs. So Quainex's most common operations work before you have signed up
+    for anything, when every provider is out of quota, and with the network
+    unplugged — which is a far better first impression than a 503.
+    """
+    response = client.post("/commands/ask", json={"utterance": "take a screenshot"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["intent"]["intent"] == "screenshot"
+    assert body["result"]["status"] == "succeeded"
