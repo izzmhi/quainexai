@@ -326,6 +326,17 @@ class Settings(BaseSettings):
     # machine.
     voice_always_listening: bool = False
 
+    # Log what was heard but ignored, for diagnosing a wake word that never fires.
+    #
+    # Off by default and worth being blunt about: turning this on writes overheard
+    # speech into the log file. That is the opposite of what the listener normally
+    # does with unaddressed audio, which is discard it. It exists because the
+    # alternative — "it hears something, ignores it, and will not tell you what" —
+    # makes a misheard wake word impossible to diagnose.
+    #
+    # Turn it on to find out why, then turn it off.
+    voice_log_ignored_speech: bool = False
+
     # Recording bounds. `max_seconds` caps a microphone stuck open; recording
     # normally ends earlier, once speech is followed by `silence_seconds` of quiet.
     voice_max_seconds: float = Field(default=15.0, gt=0)

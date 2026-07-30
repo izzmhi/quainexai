@@ -249,10 +249,21 @@ class WakeWordListener:
 
         self._heard += 1
         if not turn.wake_word_detected:
-            # Heard and discarded. Logged at debug with a length rather than the
-            # text: recording what was said in the room, when it was not addressed
-            # to Quainex, would defeat the point of discarding it.
-            _log.debug("wake_word_listener_ignored", characters=len(turn.transcript.text))
+            # Heard and discarded. The text is withheld by default: writing what was
+            # said in the room, when it was not addressed to Quainex, would undo the
+            # discarding.
+            #
+            # But "it hears something, ignores it, and will not say what" makes a
+            # wake word that never fires impossible to diagnose — so the transcript
+            # is available behind an explicit setting, and only behind one.
+            if self._settings.voice_log_ignored_speech:
+                _log.info(
+                    "wake_word_listener_ignored",
+                    heard=turn.transcript.text[:200],
+                    expected_wake_word=self._settings.wake_word,
+                )
+            else:
+                _log.debug("wake_word_listener_ignored", characters=len(turn.transcript.text))
             return
 
         self._acted += 1
