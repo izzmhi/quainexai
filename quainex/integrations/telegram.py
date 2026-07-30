@@ -76,14 +76,22 @@ _log = get_logger(__name__)
 
 _API_ROOT = "https://api.telegram.org"
 
-#: Intents whose *output* would put private data into a third-party chat. These
+#: Intents whose *reply* would carry private data into a third-party chat. These
 #: stay on the local API. The action is not dangerous — the disclosure is.
+#:
+#: The test is narrow and it is about the reply, not the action: does the text sent
+#: back to Telegram contain something that was on this machine?
+#:
+#: ``SCREENSHOT`` was on this list and should not have been. It saves a PNG locally
+#: and replies with a *file path* — the image never leaves the machine, so there is
+#: nothing to disclose. Worse, the refusal it produced said "its output would leave
+#: your machine", which was simply untrue, and a security message that misstates
+#: the reason teaches the user to distrust the ones that are right.
 TELEGRAM_BLOCKED_INTENTS: frozenset[IntentType] = frozenset(
     {
-        IntentType.CLIPBOARD,  # clipboards routinely hold passwords
-        IntentType.LOOK_AT_SCREEN,  # uploads a picture of everything on screen
-        IntentType.READ_DOCUMENT,  # uploads document contents
-        IntentType.SCREENSHOT,  # writes a file the user did not see requested
+        IntentType.CLIPBOARD,  # the reply contains the clipboard; those hold passwords
+        IntentType.LOOK_AT_SCREEN,  # the reply describes everything on screen
+        IntentType.READ_DOCUMENT,  # the reply contains the document's contents
     }
 )
 

@@ -72,14 +72,18 @@ class FakeSession:
         self._turns = list(turns)
         self._available = available
         self.cycles = 0
+        #: Whether each recording required the wake word, in order. The
+        #: follow-up window is only meaningful if it actually waives it.
+        self.wake_required: list[bool] = []
         self.listener: WakeWordListener | None = None
 
     @property
     def is_available(self) -> bool:
         return self._available
 
-    async def listen_and_respond(self, **_: object) -> VoiceTurn:
+    async def listen_and_respond(self, **kwargs: object) -> VoiceTurn:
         self.cycles += 1
+        self.wake_required.append(bool(kwargs.get("require_wake_word")))
         if not self._turns:
             # Nothing scripted left: end the run rather than looping forever.
             if self.listener is not None:
@@ -152,6 +156,82 @@ async def test_silence_is_not_counted_as_an_utterance(tmp_path):
     await asyncio.wait_for(listener.run(), timeout=5)
 
     assert listener.status()["utterances_heard"] == 0
+
+
+# -- the two-step exchange -------------------------------------------------
+
+
+def _name_only() -> VoiceTurn:
+    """A turn where the wake word arrived with no request attached."""
+    return VoiceTurn(
+        transcript=Transcript(text="Quainex"),
+        wake_word_detected=True,
+        command_text="",
+        spoken_response="Yes?",
+    )
+
+
+async def test_the_name_alone_opens_a_follow_up_without_the_wake_word(tmp_path):
+    """The exchange people actually expect: name, acknowledgement, request.
+
+    The wake word and the request used to have to arrive in one breath, which is
+    not how anyone addresses an assistant. Having just answered "Yes?", requiring
+    the name again would be absurd.
+    """
+    session = FakeSession([_name_only(), _turn("take a screenshot", detected=True)])
+    listener = _listener(session, tmp_path)
+
+    await asyncio.wait_for(listener.run(), timeout=5)
+
+    # Two recordings: the name, then the request.
+    assert session.cycles >= 2
+    assert listener.status()["requests_acted_on"] == 1
+    # The first recording required the wake word; the follow-up waived it.
+    assert session.wake_required[:2] == [True, False]
+
+
+async def test_the_follow_up_is_a_single_recording_not_a_loop(tmp_path):
+    """An open-ended follow-up would give the wake word away.
+
+    Quainex would act on unaddressed speech for as long as the room stayed noisy,
+    which is the exact thing the wake word exists to prevent.
+    """
+    session = FakeSession(
+        [
+            _name_only(),
+            _turn("just some passing conversation", detected=False),
+            _turn("and some more of it", detected=False),
+        ]
+    )
+    listener = _listener(session, tmp_path)
+
+    await asyncio.wait_for(listener.run(), timeout=5)
+
+    # Exactly one waived recording, then back to requiring the wake word.
+    assert session.wake_required.count(False) == 1
+
+
+async def test_saying_the_name_then_nothing_is_not_a_complaint(tmp_path):
+    """Silence after the acknowledgement simply returns to waiting."""
+    session = FakeSession([_name_only(), NoSpeechError("No speech was detected.")])
+    listener = _listener(session, tmp_path)
+
+    await asyncio.wait_for(listener.run(), timeout=5)
+
+    assert listener.is_running is False or listener.status()["requests_acted_on"] == 0
+
+
+def test_the_acknowledgement_is_short_and_invites_a_request(tmp_path):
+    """It is the only proof Quainex is awake, so it has to be instant.
+
+    A sentence spoken back takes longer than the request it is inviting — and
+    "I heard my name, but no request" reported a deficiency, which reads as a
+    rebuke for saying its name.
+    """
+    from quainex.core.voice.session import ACKNOWLEDGEMENT
+
+    assert len(ACKNOWLEDGEMENT) <= 12
+    assert ACKNOWLEDGEMENT.endswith("?")
 
 
 # -- refusing to run when it cannot ---------------------------------------

@@ -375,7 +375,11 @@ def test_the_bridge_reports_the_commands_it_refuses_outright(client: TestClient)
     """Screen and clipboard access stay off the phone regardless of who asks."""
     blocked = client.get("/settings/telegram").json()["blocked_intents"]
 
-    assert "screenshot" in blocked
+    # Not screenshot: it saves a PNG locally and replies with a path, so nothing
+    # from the screen travels. It was blocked, and the refusal claimed "its output
+    # would leave your machine" — which was untrue, and a security message that
+    # misstates its reason teaches the user to ignore the ones that are right.
+    assert "screenshot" not in blocked
     assert "clipboard" in blocked
     assert "look_at_screen" in blocked
 

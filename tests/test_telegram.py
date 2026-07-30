@@ -373,6 +373,22 @@ def test_output_revealing_intents_are_blocked():
     assert IntentType.READ_DOCUMENT in TELEGRAM_BLOCKED_INTENTS
 
 
+def test_the_block_is_about_the_reply_not_the_action():
+    """A screenshot discloses nothing over Telegram, so it is not blocked.
+
+    It writes a PNG to disk and replies with a file path. Nothing from the screen
+    travels. Blocking it conflated "touches the screen" with "reveals the screen" —
+    and the refusal asserted that its output would leave the machine, which was
+    false. A security message that misstates its own reason is worse than no
+    message: it teaches the user that the refusals are noise.
+    """
+    assert IntentType.SCREENSHOT not in TELEGRAM_BLOCKED_INTENTS
+    # The three that remain each put machine contents into the reply itself.
+    assert IntentType.CLIPBOARD in TELEGRAM_BLOCKED_INTENTS
+    assert IntentType.LOOK_AT_SCREEN in TELEGRAM_BLOCKED_INTENTS
+    assert IntentType.READ_DOCUMENT in TELEGRAM_BLOCKED_INTENTS
+
+
 def test_ordinary_actions_are_not_blocked():
     for intent in (IntentType.OPEN_APPLICATION, IntentType.SYSTEM_INFO, IntentType.LIST_WINDOWS):
         assert intent not in TELEGRAM_BLOCKED_INTENTS

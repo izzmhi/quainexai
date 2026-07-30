@@ -266,6 +266,16 @@ class WakeWordListener:
                 _log.debug("wake_word_listener_ignored", characters=len(turn.transcript.text))
             return
 
+        if not turn.command_text.strip():
+            # The name on its own. Quainex has just said "Yes?", so the next thing
+            # said is obviously for it — asking for the wake word again would be
+            # absurd, and it is also what forced the wake word and the request into
+            # one breath. This is the two-step exchange people actually expect:
+            #
+            #   "Quainex"  ->  "Yes?"  ->  "take a screenshot"
+            await self._follow_up()
+            return
+
         self._acted += 1
         _log.info(
             "wake_word_listener_acted",
@@ -273,3 +283,32 @@ class WakeWordListener:
             intent=None if turn.intent is None else turn.intent.intent.value,
             status=None if turn.result is None else turn.result.status.value,
         )
+
+    async def _follow_up(self) -> None:
+        """Listen once more for a request, with the wake word waived.
+
+        Exactly one extra recording, not a loop. An open-ended follow-up would
+        leave Quainex acting on unaddressed speech for as long as the room stayed
+        noisy — the wake word exists precisely to prevent that, and waiving it
+        indefinitely would give it away.
+        """
+        _log.info("wake_word_listener_awaiting_request")
+        try:
+            turn = await self._voice.listen_and_respond(require_wake_word=False)
+        except NoSpeechError:
+            # Said the name and then nothing. Not worth a spoken complaint; the
+            # next cycle simply requires the wake word again.
+            _log.info("wake_word_listener_follow_up_silent")
+            return
+        finally:
+            self._last_cycle_at = time.monotonic()
+
+        if turn.command_text.strip():
+            self._acted += 1
+            _log.info(
+                "wake_word_listener_acted",
+                command=turn.command_text[:120],
+                after_acknowledgement=True,
+                intent=None if turn.intent is None else turn.intent.intent.value,
+                status=None if turn.result is None else turn.result.status.value,
+            )

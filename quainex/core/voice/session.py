@@ -63,6 +63,13 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
+#: Spoken when the wake word arrives with no request attached.
+#:
+#: Deliberately one word. This is the only signal that Quainex is awake and
+#: listening, so it has to be instant and unmistakable — a sentence spoken back
+#: takes longer than the request it is inviting.
+ACKNOWLEDGEMENT = "Yes?"
+
 #: How many leading words may contain the wake word. Addressing something is
 #: something people do at the start of a sentence; scanning the whole utterance
 #: would let any passing mention trigger it.
@@ -341,7 +348,15 @@ class VoiceSession:
 
         command_text = match.command if match.detected else transcript.text.strip()
         if not command_text:
-            response = "I heard my name, but no request."
+            # Short, and an invitation rather than a complaint.
+            #
+            # This is the only moment Quainex proves it is awake, and the wording
+            # carries real weight: "I heard my name, but no request" reports a
+            # deficiency, which reads as a rebuke for saying its name. One word that
+            # hands the turn back is what an assistant does — and it is also the
+            # cue the listener uses to open a follow-up window, so this reply is
+            # functional, not decorative.
+            response = ACKNOWLEDGEMENT
             if speak:
                 await self.say(response)
             return VoiceTurn(
