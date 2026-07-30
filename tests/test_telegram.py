@@ -14,6 +14,7 @@ import pytest
 from quainex.config.settings import Settings
 from quainex.core.brain import Brain, IntentClassification, IntentType
 from quainex.core.commands import build_executor
+from quainex.core.exceptions import ProviderError
 from quainex.integrations.telegram import (
     TELEGRAM_BLOCKED_INTENTS,
     TelegramBridge,
@@ -128,6 +129,121 @@ def test_status_reports_what_is_blocked(tmp_path):
     assert status["configured"] is False
     assert "clipboard" in status["blocked_intents"]
     assert "look_at_screen" in status["blocked_intents"]
+
+
+# -- failures must be visible on the phone ---------------------------------
+
+
+class SendRecorder:
+    """Captures what the bridge tried to send, instead of sending it.
+
+    Attributes:
+        sent: The text of every outbound message.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def post(self, url: str, **kwargs: object) -> object:
+        json_body = kwargs.get("json")
+        if isinstance(json_body, dict):
+            self.sent.append(str(json_body.get("text", "")))
+        return _OkResponse()
+
+
+class _OkResponse:
+    """Minimal stand-in for a successful Telegram response."""
+
+    status_code = 200
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return {"ok": True, "result": {}}
+
+
+async def test_a_provider_failure_is_reported_to_the_chat_not_only_the_log(tmp_path):
+    """The bug that made a working bridge look dead.
+
+    Every provider was out of quota, the exception was logged, and *nothing* was
+    sent back. From the phone that is indistinguishable from a crashed server —
+    and the log is on a machine the user is not looking at, which is the whole
+    reason they are on Telegram.
+    """
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    recorder = SendRecorder()
+
+    # The Brain raises exactly as it did in the real failure.
+    async def exhausted(*_args: object, **_kwargs: object) -> None:
+        raise ProviderError("Every AI provider failed. groq: 429; gemini: 429")
+
+    bridge._brain.interpret = exhausted  # type: ignore[method-assign]
+
+    await bridge._dispatch(
+        recorder,  # type: ignore[arg-type]
+        _parse_update(
+            {
+                "update_id": 1,
+                "message": {"chat": {"id": 7}, "from": {"id": ALLOWED_USER}, "text": "hello"},
+            }
+        ),
+    )
+
+    assert len(recorder.sent) == 1
+    reply = recorder.sent[0]
+    # Says it is a quota rather than a fault, because that changes what the user
+    # should do about it.
+    assert "quota" in reply.lower()
+    # And does not paste three nested vendor JSON blobs into a phone screen.
+    assert "429" not in reply
+
+
+async def test_an_unexpected_failure_stays_generic(tmp_path):
+    """A traceback is not something to put in a chat transcript."""
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    recorder = SendRecorder()
+
+    async def boom(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("internal detail nobody should see")
+
+    bridge._brain.interpret = boom  # type: ignore[method-assign]
+
+    await bridge._dispatch(
+        recorder,  # type: ignore[arg-type]
+        _parse_update(
+            {
+                "update_id": 1,
+                "message": {"chat": {"id": 7}, "from": {"id": ALLOWED_USER}, "text": "hello"},
+            }
+        ),
+    )
+
+    assert len(recorder.sent) == 1
+    assert "internal detail nobody should see" not in recorder.sent[0]
+    assert "went wrong" in recorder.sent[0]
+
+
+async def test_a_stranger_still_gets_no_reply_at_all(tmp_path):
+    """Error reporting must not become an oracle.
+
+    Replying to an unknown sender — even to refuse — confirms the bot exists and
+    is listening, which is information they have not earned.
+    """
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    recorder = SendRecorder()
+
+    await bridge._dispatch(
+        recorder,  # type: ignore[arg-type]
+        _parse_update(
+            {
+                "update_id": 1,
+                "message": {"chat": {"id": 7}, "from": {"id": STRANGER}, "text": "hello"},
+            }
+        ),
+    )
+
+    assert recorder.sent == []
 
 
 # -- privacy: what must not leave the machine -----------------------------

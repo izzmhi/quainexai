@@ -61,6 +61,7 @@ from pydantic import BaseModel
 
 from quainex.core.brain import IntentType
 from quainex.core.commands import CommandStatus
+from quainex.core.exceptions import ProviderError, QuainexError
 from quainex.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -299,12 +300,37 @@ class TelegramBridge:
             _log.warning("telegram_unauthorised", user_id=update.user_id)
             return
 
-        if update.callback_data and update.chat_id:
-            await self._handle_button(client, update)
-        elif update.voice_file_id and update.chat_id:
-            await self._handle_voice(client, update)
-        elif update.text and update.chat_id:
-            await self._handle_text(client, update.chat_id, update.text)
+        if update.chat_id is None:
+            return
+
+        # Every handler is wrapped, because the alternative is silence.
+        #
+        # Before this, a failure inside a handler propagated to the polling loop,
+        # which logged it and carried on — correct for the bridge's uptime, and
+        # useless for the person holding the phone. They saw nothing at all and
+        # concluded the whole system was dead, when in fact every provider was
+        # simply out of quota. A remote interface that can fail invisibly is worse
+        # than one that fails loudly: the log is on a machine they are not looking
+        # at, which is the entire reason they are using Telegram.
+        try:
+            if update.callback_data:
+                await self._handle_button(client, update)
+            elif update.voice_file_id:
+                await self._handle_voice(client, update)
+            elif update.text:
+                await self._handle_text(client, update.chat_id, update.text)
+        except QuainexError as exc:
+            _log.warning("telegram_request_failed", reason=exc.message)
+            await self._send(client, update.chat_id, _explain(exc))
+        except Exception:
+            # Unexpected, so the message stays generic — an internal traceback is
+            # not something to put in a chat transcript. The log has the detail.
+            _log.exception("telegram_dispatch_failed")
+            await self._send(
+                client,
+                update.chat_id,
+                "Something went wrong handling that. The details are in the Quainex log.",
+            )
 
     # -- handlers ----------------------------------------------------------
 
@@ -516,6 +542,32 @@ def _truncate(text: str) -> str:
     if len(text) <= _MAX_MESSAGE_CHARS:
         return text
     return text[:_MAX_MESSAGE_CHARS] + "\n\n…(truncated)"
+
+
+def _explain(error: QuainexError) -> str:
+    """Turn an internal failure into something useful on a phone.
+
+    The generic path is to relay the message, which is already written for a
+    person. Provider exhaustion gets its own wording because the raw text is three
+    nested vendor JSON blobs — accurate, unreadable on a phone, and it buries the
+    one thing that matters: this is a quota, not a fault, and it will come back.
+
+    Args:
+        error: The failure.
+
+    Returns:
+        Text to send to the chat.
+    """
+    if isinstance(error, ProviderError):
+        return (
+            "⚠️ No AI provider could answer — every configured one is out of quota "
+            "or credit right now.\n\n"
+            "This is a limit, not a breakage: free tiers reset, so it will start "
+            "working again on its own. Add another key in the dashboard's Settings "
+            "panel if you would rather not wait.\n\n"
+            "Commands that do not need a model are unaffected."
+        )
+    return f"⚠️ {error.message}"
 
 
 def _senders(raw_updates: list[dict[str, Any]]) -> list[dict[str, object]]:
