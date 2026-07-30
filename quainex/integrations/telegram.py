@@ -52,6 +52,7 @@ Future improvements:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 import time
 from pathlib import Path
@@ -67,6 +68,8 @@ from quainex.core.exceptions import ProviderError, QuainexError
 from quainex.core.logging import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from quainex.config.settings import Settings
     from quainex.core.brain import Brain, Intent
     from quainex.core.commands import CommandExecutor
@@ -115,6 +118,10 @@ _MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 #: The Bot API caps ``sendDocument`` at 50 MB.
 _MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+
+#: How often to re-send the "typing…" action. Telegram's lasts about five seconds;
+#: four keeps it continuous without hammering the API.
+_TYPING_REFRESH_SECONDS = 4.0
 
 
 class TelegramUpdate(BaseModel):
@@ -452,25 +459,31 @@ class TelegramBridge:
         """
         command = text.strip()
         if command.startswith("/"):
-            await self._send(client, chat_id, self._builtin(command))
+            await self._send(client, chat_id, await self._builtin(command))
             return
 
-        history = await self._memory.conversation_context() if self._memory else None
-        intent = await self._brain.interpret(command, history=history)
+        # A "typing…" indicator from the first moment, kept alive for the whole
+        # turn. A local match finishes before it is even visible; a request that has
+        # to fall through several rate-limited providers can take ten seconds, and
+        # without this the chat looks frozen. Telegram's typing action expires after
+        # ~5s, so it is re-sent on a timer rather than issued once.
+        async with self._typing(client, chat_id):
+            history = await self._memory.conversation_context() if self._memory else None
+            intent = await self._brain.interpret(command, history=history)
 
-        if intent.intent in TELEGRAM_BLOCKED_INTENTS:
-            await self._send(
-                client,
-                chat_id,
-                f"`{intent.intent.value}` is disabled over Telegram because its output "
-                "would leave your machine. Use the local API for that one.",
-            )
-            return
+            if intent.intent in TELEGRAM_BLOCKED_INTENTS:
+                await self._send(
+                    client,
+                    chat_id,
+                    f"`{intent.intent.value}` is disabled over Telegram because its output "
+                    "would leave your machine. Use the local API for that one.",
+                )
+                return
 
-        result = await self._commands.execute(intent)
+            result = await self._commands.execute(intent)
 
-        if self._memory is not None:
-            await self._memory.remember_exchange(command, intent, result)
+            if self._memory is not None:
+                await self._memory.remember_exchange(command, intent, result)
 
         if result.status is CommandStatus.REQUIRES_CONFIRMATION and result.confirmation_token:
             key = f"c{len(self._pending)}{intent.intent.value[:8]}"[:60]
@@ -481,6 +494,57 @@ class TelegramBridge:
         await self._send(client, chat_id, result.message)
         await self._maybe_send_image(client, chat_id, intent, result)
         await self._maybe_send_document(client, chat_id, intent, result)
+
+    @contextlib.asynccontextmanager
+    async def _typing(self, client: httpx.AsyncClient, chat_id: int) -> AsyncIterator[None]:
+        """Show a "typing…" indicator in the chat for the duration of a block.
+
+        Telegram's typing action lasts about five seconds, so for anything slower a
+        single call would flicker off mid-thought. A background task re-sends it on
+        a timer, and is cancelled the instant the block finishes — the indicator
+        disappears exactly when the reply arrives, which is the behaviour that reads
+        as "it was working, and now it's done".
+
+        Args:
+            client: HTTP client.
+            chat_id: The chat to show typing in.
+
+        Yields:
+            Control, while typing is shown.
+        """
+
+        async def keep_alive() -> None:
+            while True:
+                await self._send_chat_action(client, chat_id, "typing")
+                await asyncio.sleep(_TYPING_REFRESH_SECONDS)
+
+        task = asyncio.create_task(keep_alive())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _send_chat_action(self, client: httpx.AsyncClient, chat_id: int, action: str) -> None:
+        """Send a chat action (typing, uploading a photo, …).
+
+        Best-effort: a failed indicator must never affect the actual work, so any
+        error is swallowed. The point is feedback, not correctness.
+
+        Args:
+            client: HTTP client.
+            chat_id: The chat.
+            action: A Telegram chat action, e.g. ``"typing"``.
+        """
+        try:
+            await client.post(
+                f"{self._url()}/sendChatAction",
+                json={"chat_id": chat_id, "action": action},
+                timeout=10,
+            )
+        except httpx.HTTPError:
+            pass
 
     async def _maybe_send_document(
         self,
@@ -682,19 +746,24 @@ class TelegramBridge:
             )
             return
 
-        file_response = await client.get(
-            f"{self._url()}/getFile", params={"file_id": update.voice_file_id}
-        )
-        file_response.raise_for_status()
-        remote_path = file_response.json()["result"]["file_path"]
+        # Transcription downloads the clip and runs Whisper — several seconds. Show
+        # activity throughout, so a voice note does not sit in silence.
+        async with self._typing(client, update.chat_id):
+            file_response = await client.get(
+                f"{self._url()}/getFile", params={"file_id": update.voice_file_id}
+            )
+            file_response.raise_for_status()
+            remote_path = file_response.json()["result"]["file_path"]
 
-        audio = await client.get(f"{_API_ROOT}/file/bot{self._token()}/{remote_path}", timeout=60)
-        audio.raise_for_status()
+            audio = await client.get(
+                f"{_API_ROOT}/file/bot{self._token()}/{remote_path}", timeout=60
+            )
+            audio.raise_for_status()
 
-        with tempfile.TemporaryDirectory(prefix="quainex-tg-") as tmp:
-            local = Path(tmp) / "voice.ogg"
-            local.write_bytes(audio.content)
-            transcript = await self._voice.transcribe(local)
+            with tempfile.TemporaryDirectory(prefix="quainex-tg-") as tmp:
+                local = Path(tmp) / "voice.ogg"
+                local.write_bytes(audio.content)
+                transcript = await self._voice.transcribe(local)
 
         if not transcript.text.strip():
             await self._send(client, update.chat_id, "I could not make that out.")
@@ -704,7 +773,7 @@ class TelegramBridge:
         # Voice notes are addressed by being sent, so the wake word is redundant.
         await self._handle_text(client, update.chat_id, transcript.text)
 
-    def _builtin(self, command: str) -> str:
+    async def _builtin(self, command: str) -> str:
         """Answer a slash command locally, without the model.
 
         Args:
@@ -716,19 +785,69 @@ class TelegramBridge:
         verb = command.split()[0].lower()
         if verb in {"/start", "/help"}:
             return (
-                "*Quainex*\n\n"
-                "Send me a request in plain language — 'open vs code', "
-                "'run the tests', 'what's my battery' — or record a voice note.\n\n"
+                "🟢 Quainex\n\n"
+                "Send me a request in plain language, or a voice note:\n"
+                "  • open chrome · close spotify · what's running\n"
+                "  • take a screenshot · take a webcam picture\n"
+                "  • set volume to 30 · pause · next\n"
+                "  • send me my latest download\n"
+                "  • where is my laptop · panic\n\n"
                 "Anything risky comes back with Yes/No buttons first.\n\n"
-                "/status — what I can currently do"
+                "/status — a live snapshot of this machine"
             )
         if verb == "/status":
-            blocked = ", ".join(sorted(i.value for i in TELEGRAM_BLOCKED_INTENTS))
-            return (
-                f"Connected. {len(self._commands.catalogue)} commands available.\n\n"
-                f"Disabled over Telegram (output would leave your machine): {blocked}"
-            )
+            return await self._status_report()
         return f"Unknown command `{verb}`. Try /help."
+
+    async def _status_report(self) -> str:
+        """Build a rich, live snapshot of the machine.
+
+        Composed entirely from local, token-free sources — system metrics, Wi-Fi,
+        the process list, the voice/listener state. Each piece is guarded on its
+        own, so one unavailable subsystem degrades to a line rather than failing
+        the whole report.
+
+        Returns:
+            A formatted multi-line status.
+        """
+        desktop = self._commands.context.desktop
+        lines = ["📟 Quainex — status", ""]
+
+        try:
+            snap = desktop.system_info()
+            battery = (
+                f" · 🔋 {snap.battery_percent:.0f}%" if snap.battery_percent is not None else ""
+            )
+            uptime = _format_uptime(snap.uptime_seconds)
+            lines.append(
+                f"🖥 CPU {snap.cpu_percent:.0f}% · RAM {snap.memory_percent:.0f}% · "
+                f"Disk {snap.disk_percent:.0f}%{battery}"
+            )
+            lines.append(f"⏱ Up {uptime}")
+        except Exception as exc:
+            lines.append(f"🖥 System metrics unavailable ({exc}).")
+
+        try:
+            lines.append(f"📶 {desktop.wifi_status()}")
+        except Exception:
+            lines.append("📶 Wi-Fi state unavailable.")
+
+        try:
+            apps = desktop.list_running_apps(8)
+            if apps:
+                lines.append("🪟 Running: " + ", ".join(apps))
+        except Exception:
+            # The process list is a nicety; its absence just drops one line.
+            _log.debug("status_running_apps_unavailable")
+
+        voice = "on" if self._voice and self._voice.is_available else "off"
+        lines.append(f"🎙 Voice notes: {voice}")
+
+        lines.append("")
+        lines.append(f"⚙️ {len(self._commands.catalogue)} commands · everything above cost 0 tokens")
+        blocked = ", ".join(sorted(i.value for i in TELEGRAM_BLOCKED_INTENTS))
+        lines.append(f"🔒 Kept off Telegram: {blocked}")
+        return "\n".join(lines)
 
     # -- transport ---------------------------------------------------------
 
@@ -752,15 +871,30 @@ class TelegramBridge:
     async def _send(self, client: httpx.AsyncClient, chat_id: int, text: str) -> None:
         """Send a plain message.
 
+        **No ``parse_mode``**, and that is a fix, not an omission. Every message
+        used to be sent as Markdown, so any reply containing an underscore or
+        asterisk — a file name like ``twilio_2FA.txt``, an intent like
+        ``look_at_screen`` — was invalid Markdown, and Telegram rejected the whole
+        message with a 400. The reply simply never arrived, which is
+        indistinguishable from "it ignored me". Plain text always delivers; the
+        emoji and line structure carry the styling without the fragility.
+
+        The send is checked now too: a non-2xx is logged rather than swallowed, so
+        a message that fails to deliver leaves a trace instead of vanishing.
+
         Args:
             client: HTTP client.
             chat_id: Where to send.
             text: What to send, truncated to Telegram's limit.
         """
-        await client.post(
-            f"{self._url()}/sendMessage",
-            json={"chat_id": chat_id, "text": _truncate(text), "parse_mode": "Markdown"},
-        )
+        try:
+            response = await client.post(
+                f"{self._url()}/sendMessage",
+                json={"chat_id": chat_id, "text": _truncate(text)},
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            _log.warning("telegram_send_failed", error=str(exc))
 
     async def _send_confirmation(
         self, client: httpx.AsyncClient, chat_id: int, question: str, key: str
@@ -792,6 +926,26 @@ class TelegramBridge:
                 },
             },
         )
+
+
+def _format_uptime(seconds: float) -> str:
+    """Render an uptime in seconds as a short human string.
+
+    Args:
+        seconds: Uptime in seconds.
+
+    Returns:
+        Something like ``2d 3h`` or ``15m``.
+    """
+    total = int(seconds)
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 def _truncate(text: str) -> str:

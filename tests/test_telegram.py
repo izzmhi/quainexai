@@ -608,17 +608,24 @@ def test_long_messages_are_trimmed_to_telegrams_limit():
 
 
 @pytest.mark.parametrize("command", ["/start", "/help"])
-def test_help_is_answered_without_calling_the_model(tmp_path, command):
-    reply = _bridge(tmp_path)._builtin(command)
+async def test_help_is_answered_without_calling_the_model(tmp_path, command):
+    reply = await _bridge(tmp_path)._builtin(command)
     assert "Quainex" in reply
     assert "voice note" in reply
 
 
-def test_status_command_names_what_is_disabled(tmp_path):
-    reply = _bridge(tmp_path)._builtin("/status")
+async def test_status_is_a_rich_local_snapshot(tmp_path):
+    """Composed from local sources — no model, and it says so."""
+    reply = await _bridge(tmp_path)._builtin("/status")
+
+    # Built from the fake controller's metrics and window list.
+    assert "CPU" in reply
+    assert "TestNet" in reply  # the fake's Wi-Fi
+    assert "Chrome" in reply  # the fake's running apps
+    assert "0 tokens" in reply
+    # Still names what is kept off Telegram.
     assert "clipboard" in reply
-    assert "commands available" in reply
 
 
-def test_unknown_slash_commands_are_reported(tmp_path):
-    assert "Unknown command" in _bridge(tmp_path)._builtin("/launch_missiles")
+async def test_unknown_slash_commands_are_reported(tmp_path):
+    assert "Unknown command" in await _bridge(tmp_path)._builtin("/launch_missiles")

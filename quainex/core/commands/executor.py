@@ -134,6 +134,16 @@ class CommandExecutor:
         """Every executable intent and its summary."""
         return self._registry.catalogue()
 
+    @property
+    def context(self) -> CommandContext:
+        """The collaborators commands act through.
+
+        Exposed so a caller that needs a read-only fact — the Telegram bridge's
+        ``/status``, for one — can reach the desktop controller without routing a
+        synthetic intent through the whole dispatch pipeline for a number.
+        """
+        return self._context
+
     async def execute(
         self,
         intent: Intent,
