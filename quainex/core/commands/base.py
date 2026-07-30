@@ -40,6 +40,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent, IntentType
+    from quainex.core.conversation import Conversationalist
     from quainex.core.devtools.assistant import CodeAssistant
     from quainex.core.devtools.runner import DevRunner
     from quainex.vision.screen import ScreenAnalyst
@@ -104,12 +105,15 @@ class CommandContext:
         dev: Development operations, when configured.
         code: AI-backed code assistance, when configured.
         vision: Screen and document understanding, when configured.
+        conversation: Replies for the intents that are not machine actions, when
+            configured.
     """
 
     desktop: DesktopController
     dev: DevRunner | None = None
     code: CodeAssistant | None = None
     vision: ScreenAnalyst | None = None
+    conversation: Conversationalist | None = None
 
 
 #: A command implementation: given the context and the intent, do the thing and
@@ -145,6 +149,11 @@ class Command:
             ``allow_destructive_commands``. Set independently of the Brain's
             confirmation policy: confirmation asks the user, this asks the
             operator, and both must pass.
+        has_side_effect: Whether running this changes anything outside Quainex.
+            Defaults to ``True`` because almost every command does; the exceptions
+            are the ones that only produce text. It becomes ``CommandResult.
+            executed``, which the audit trail records, so a command that merely
+            answers a question must not claim the machine was touched.
     """
 
     intent: IntentType
@@ -152,3 +161,4 @@ class Command:
     handler: CommandHandler
     requires_target: bool = False
     destructive: bool = False
+    has_side_effect: bool = True

@@ -63,6 +63,8 @@ class AIProviderName(StrEnum):
     GROQ = "groq"
     #: Free tier, native schema enforcement, and vision.
     GEMINI = "gemini"
+    #: Aggregator with free models. One key reaches many vendors.
+    OPENROUTER = "openrouter"
     #: Paid, strongest structured output and vision.
     ANTHROPIC = "anthropic"
     #: Any OpenAI-compatible server, including a local Ollama.
@@ -131,6 +133,7 @@ class Settings(BaseSettings):
         default_factory=lambda: [
             AIProviderName.GROQ,
             AIProviderName.GEMINI,
+            AIProviderName.OPENROUTER,
             AIProviderName.ANTHROPIC,
             AIProviderName.LOCAL,
         ]
@@ -145,8 +148,17 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-2.0-flash"
 
-    # --- Local / self-hosted (Ollama, LM Studio, OpenRouter) -------------
-    # Offline mode: no key needed, nothing leaves the machine.
+    # --- OpenRouter (free tier) ------------------------------------------
+    # One key, many vendors. First-class rather than folded into `local` below:
+    # its base URL is fixed and known, so requiring the user to also supply a URL
+    # would make a pasted key silently do nothing.
+    openrouter_api_key: SecretStr | None = None
+    openrouter_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+
+    # --- Local / self-hosted (Ollama, LM Studio) -------------------------
+    # Offline mode: no key needed, nothing leaves the machine. Needs a URL — this
+    # slot points at a server only you know about, so there is no default.
     local_base_url: str = ""
     local_model: str = "llama3.1"
     local_api_key: SecretStr | None = None
@@ -162,10 +174,23 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     ai_model: str = "claude-opus-5"
     ai_effort: AIEffort = AIEffort.MEDIUM
-    # Note: on current models this budget covers reasoning *and* the visible
+    # Note: on current Claude models this budget covers reasoning *and* the visible
     # answer, so it is set well above what the answer alone needs. Too low and
     # responses truncate mid-thought.
     ai_max_tokens: int = Field(default=8192, ge=1)
+
+    # Cap used for hosted free tiers instead of the value above.
+    #
+    # This is not tidiness, it is the difference between working and not. Free
+    # tiers meter *requested* tokens against a per-minute budget, and `max_tokens`
+    # is a request whether or not the model uses it. Groq's free tier allows 12000
+    # tokens per minute, so asking for 8192 on every call means roughly one
+    # request per minute before a 429 — which looks like an outage, not a quota.
+    #
+    # These models also have no hidden reasoning to fund: the budget covers only
+    # the visible answer, so a smaller number costs nothing in quality. The reason
+    # for the large default above does not apply to them.
+    ai_max_tokens_free_tier: int = Field(default=1536, ge=1)
 
     # --- Brain -----------------------------------------------------------
     # Classifications below this confidence still return their best guess, but
@@ -473,7 +498,12 @@ class Settings(BaseSettings):
         Quainex boots without one; AI-backed features degrade rather than crash.
         A local endpoint counts, since it needs a URL rather than a key.
         """
-        keys = (self.groq_api_key, self.gemini_api_key, self.anthropic_api_key)
+        keys = (
+            self.groq_api_key,
+            self.gemini_api_key,
+            self.openrouter_api_key,
+            self.anthropic_api_key,
+        )
         if any(key is not None and key.get_secret_value().strip() for key in keys):
             return True
         return bool(self.local_base_url.strip())

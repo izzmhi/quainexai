@@ -146,6 +146,22 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
     ),
 }
 
+#: Intents that produce a reply rather than an effect on the machine.
+#:
+#: One definition, used in four places: ``Intent.is_actionable``, the confirmation
+#: policy (which exempts them, since there is nothing to approve), the capability
+#: list the assistant is given about itself, and the command registry. Written out
+#: separately in each, they would eventually disagree — and a conversational intent
+#: that one site thinks is actionable is exactly how a "reply" acquires a side
+#: effect.
+NON_ACTIONABLE: frozenset[IntentType] = frozenset(
+    {
+        IntentType.ANSWER_QUESTION,
+        IntentType.SMALL_TALK,
+        IntentType.UNKNOWN,
+    }
+)
+
 #: Intents that are disruptive or hard to reverse, and must be confirmed by the
 #: user before Phase 3 executes them — regardless of how confident the model is.
 #: This directly implements the "never execute dangerous actions without
@@ -203,9 +219,29 @@ class Intent(IntentClassification):
 
     Attributes:
         requires_confirmation: Whether Phase 3 must ask the user before acting.
+        utterance: What the user actually said. Carried here rather than left
+            behind because the conversational intents need it: ``SMALL_TALK`` has
+            no ``target`` by definition, so without this a handler for "how are
+            you?" would receive nothing to reply to. It also makes the audit trail
+            answer "what was said" and not only "what was decided".
+
+            Set by the Brain, never by the model — it is deliberately absent from
+            ``IntentClassification`` so that a classifier cannot rewrite the
+            request it was given.
     """
 
     requires_confirmation: bool
+    utterance: str = ""
+
+    @property
+    def subject(self) -> str:
+        """The text a conversational handler should respond to.
+
+        Returns:
+            The target when the classifier extracted one, otherwise the original
+            utterance.
+        """
+        return (self.target or "").strip() or self.utterance.strip()
 
     def parameters_as_dict(self) -> dict[str, str]:
         """Return the parameter list as a mapping.
@@ -221,8 +257,4 @@ class Intent(IntentClassification):
     @property
     def is_actionable(self) -> bool:
         """Whether this intent maps to a machine action rather than conversation."""
-        return self.intent not in {
-            IntentType.ANSWER_QUESTION,
-            IntentType.SMALL_TALK,
-            IntentType.UNKNOWN,
-        }
+        return self.intent not in NON_ACTIONABLE

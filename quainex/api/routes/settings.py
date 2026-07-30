@@ -81,6 +81,12 @@ _SECRET_GUIDE: dict[str, dict[str, str]] = {
         "url": "https://aistudio.google.com/apikey",
         "prefix": "AIza",
     },
+    "openrouter_api_key": {
+        "label": "OpenRouter",
+        "detail": "Free tier. One key reaches many vendors.",
+        "url": "https://openrouter.ai/keys",
+        "prefix": "sk-or-",
+    },
     "anthropic_api_key": {
         "label": "Anthropic Claude",
         "detail": "Paid. Strongest reasoning; used as the fallback.",
@@ -89,7 +95,10 @@ _SECRET_GUIDE: dict[str, dict[str, str]] = {
     },
     "local_api_key": {
         "label": "Local / self-hosted",
-        "detail": "Optional key for Ollama, LM Studio or OpenRouter.",
+        # Stated plainly because a key alone does nothing here: this slot points
+        # at a server only the user knows about, so it needs a URL in .env too.
+        # Without saying so, a pasted key looks accepted and silently never runs.
+        "detail": "Ollama or LM Studio. Also needs QUAINEX_LOCAL_BASE_URL in .env.",
         "url": "",
         "prefix": "",
     },

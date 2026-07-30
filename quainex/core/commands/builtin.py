@@ -209,6 +209,22 @@ def build_commands(settings: Settings) -> list[Command]:
             data={"windows": [window.model_dump() for window in windows]},
         )
 
+    # --- conversation ----------------------------------------------------
+    #
+    # These three carry no side effect, which is why they reach `ctx.conversation`
+    # and nothing else. A conversational reply must not be able to touch the
+    # desktop: "I've opened that for you" when nothing was opened is worse than an
+    # error, and making the action unreachable from here is the only way to be sure.
+
+    async def converse(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        _require(ctx.conversation, "Conversation")
+        assert ctx.conversation is not None  # noqa: S101
+        return CommandOutcome(
+            message=await ctx.conversation.reply(message=intent.subject, kind=intent.intent),
+            # No `data`: there is nothing structured to pass on, and an empty
+            # object in the transcript is noise.
+        )
+
     return [
         Command(
             intent=IntentType.OPEN_APPLICATION,
@@ -335,6 +351,29 @@ def build_commands(settings: Settings) -> list[Command]:
             intent=IntentType.LIST_WINDOWS,
             summary="List open windows. Local; no model call.",
             handler=list_windows,
+        ),
+        # `requires_target` is False for all three: a greeting has no target by
+        # definition, and the handler falls back to the utterance via
+        # `Intent.subject`. Registering them with a target requirement would
+        # reintroduce the original bug in a new disguise — a rejection at the
+        # executor's fourth gate instead of its first.
+        Command(
+            intent=IntentType.ANSWER_QUESTION,
+            summary="Answer a question. No side effects.",
+            handler=converse,
+            has_side_effect=False,
+        ),
+        Command(
+            intent=IntentType.SMALL_TALK,
+            summary="Reply to a greeting or conversational remark.",
+            handler=converse,
+            has_side_effect=False,
+        ),
+        Command(
+            intent=IntentType.UNKNOWN,
+            summary="Say plainly that the request was not understood, and what is possible.",
+            handler=converse,
+            has_side_effect=False,
         ),
     ]
 

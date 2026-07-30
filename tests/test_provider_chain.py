@@ -356,12 +356,14 @@ def test_free_providers_lead_by_default(tmp_path: Path):
         credentials_path=tmp_path / "credentials.dat",
     )
 
-    assert [str(name) for name in settings.ai_providers] == [
-        "groq",
-        "gemini",
-        "anthropic",
-        "local",
-    ]
+    order = [str(name) for name in settings.ai_providers]
+
+    assert order == ["groq", "gemini", "openrouter", "anthropic", "local"]
+    # The property that matters, asserted separately from the exact list so that
+    # adding a provider does not require re-stating the whole intent: the paid
+    # one is a backstop, never the first thing reached for.
+    assert order.index("anthropic") > order.index("groq")
+    assert order.index("anthropic") > order.index("gemini")
 
 
 def test_a_local_endpoint_counts_as_configured_without_any_key(tmp_path: Path):
@@ -375,6 +377,42 @@ def test_a_local_endpoint_counts_as_configured_without_any_key(tmp_path: Path):
     )
 
     assert settings.has_ai_credentials is True
+
+
+def test_free_tiers_get_a_smaller_token_cap_than_the_paid_provider(tmp_path: Path):
+    """A single request must not spend a whole minute's quota.
+
+    Free tiers meter *requested* tokens, and ``max_tokens`` is a request whether
+    or not the model uses it. Groq's free tier allows 12000 tokens per minute, so
+    the 8192 default meant roughly one call per minute before a 429 — which
+    presents as an outage rather than a quota. These models also have no hidden
+    reasoning to fund, which is the only reason the large default exists.
+    """
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        log_dir=tmp_path / "logs",
+        database_path=tmp_path / "test.db",
+        credentials_path=tmp_path / "credentials.dat",
+        groq_api_key="gsk_test_key_value",
+        openrouter_api_key="sk-or-test_key_value",
+    )
+
+    assert settings.ai_max_tokens_free_tier < settings.ai_max_tokens
+    # Small enough that several calls fit inside Groq's 12000-per-minute budget.
+    assert settings.ai_max_tokens_free_tier * 4 < 12000
+
+    chain = Container._build_ai_provider(settings)
+    assert isinstance(chain, FallbackProvider)
+    caps = {
+        provider.name.split("/")[0]: provider._max_tokens
+        for provider in chain.providers
+        if isinstance(provider, OpenAICompatibleProvider)
+    }
+
+    assert caps["groq"] == settings.ai_max_tokens_free_tier
+    assert caps["openrouter"] == settings.ai_max_tokens_free_tier
+    # Your own machine has no per-minute quota to fit inside.
+    assert caps["local"] == settings.ai_max_tokens
 
 
 async def test_an_openai_compatible_provider_without_a_url_is_inert():

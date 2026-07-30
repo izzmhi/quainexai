@@ -44,7 +44,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from quainex.core.brain.prompts import SYSTEM_PROMPT
-from quainex.core.brain.schemas import CONFIRMATION_REQUIRED, Intent, IntentClassification
+from quainex.core.brain.schemas import (
+    CONFIRMATION_REQUIRED,
+    NON_ACTIONABLE,
+    Intent,
+    IntentClassification,
+)
 from quainex.core.exceptions import InvalidUtteranceError
 from quainex.core.logging import get_logger
 from quainex.services.ai.provider import ChatMessage
@@ -117,6 +122,10 @@ class Brain:
         intent = Intent(
             **classification.model_dump(),
             requires_confirmation=self._needs_confirmation(classification),
+            # The validated utterance, not the raw one, and not whatever the model
+            # may have echoed back: a conversational handler replies to this, so it
+            # must be what the user actually said.
+            utterance=cleaned,
         )
 
         # Audit record: this is the decision that Phase 3 will act on, so it is
@@ -164,6 +173,19 @@ class Brain:
         1. The intent is inherently disruptive or hard to reverse.
         2. The classification is not confident enough to act on unattended.
 
+        One exemption, and it is a security decision rather than a convenience:
+        **conversational intents are never gated.** There is nothing to approve —
+        the reply has no side effect and cannot be made to have one, because the
+        handler has no access to the desktop at all.
+
+        Left in, the low-confidence rule made gibberish produce *"Confirm:
+        unknown?"* — a prompt asking permission for nothing. That is worse than
+        noise. Confirmation only protects anything if the user reads it, and a
+        system that asks "are you sure?" about a greeting teaches them to click
+        yes without looking. The one time it matters — shutting the machine down —
+        they would click straight through. Cheapening the prompt is how the
+        mechanism stops working.
+
         Args:
             classification: The model's classification.
 
@@ -172,4 +194,6 @@ class Brain:
         """
         if classification.intent in CONFIRMATION_REQUIRED:
             return True
+        if classification.intent in NON_ACTIONABLE:
+            return False
         return classification.confidence < self._settings.brain_confidence_threshold

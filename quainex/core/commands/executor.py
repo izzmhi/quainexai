@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from quainex.config.settings import Settings
     from quainex.core.automation.desktop import DesktopController
     from quainex.core.brain import Intent
+    from quainex.core.conversation import Conversationalist
     from quainex.core.devtools.assistant import CodeAssistant
     from quainex.core.devtools.runner import DevRunner
     from quainex.security.confirmations import ConfirmationService
@@ -250,12 +251,19 @@ class CommandExecutor:
             intent=intent.intent.value,
             target=intent.target,
             confirmed=intent.requires_confirmation,
+            side_effect=command.has_side_effect,
         )
         return CommandResult(
             status=CommandStatus.SUCCEEDED,
             intent=intent.intent.value,
             message=outcome.message,
-            executed=True,
+            # `executed` is documented as "whether any side effect occurred", so a
+            # command that only produces text must report False. Setting it True
+            # for a greeting would put "small_talk executed=True" in the audit
+            # trail, and an auditor would reasonably read that as the machine
+            # having been changed. The status already says the command succeeded;
+            # this field exists to answer a different question.
+            executed=command.has_side_effect,
             data=outcome.data,
         )
 
@@ -346,13 +354,14 @@ def build_executor(
     dev: DevRunner | None = None,
     code: CodeAssistant | None = None,
     vision: ScreenAnalyst | None = None,
+    conversation: Conversationalist | None = None,
 ) -> CommandExecutor:
     """Assemble a registry of built-in commands and an executor over it.
 
-    ``dev``, ``code`` and ``vision`` are optional so that a caller wanting only
-    desktop commands — most tests — need not construct a model client to get one.
-    Commands whose collaborator is absent refuse with a clear message rather than
-    failing obscurely.
+    ``dev``, ``code``, ``vision`` and ``conversation`` are optional so that a
+    caller wanting only desktop commands — most tests — need not construct a model
+    client to get one. Commands whose collaborator is absent refuse with a clear
+    message rather than failing obscurely.
 
     Args:
         desktop: The controller commands act through.
@@ -361,13 +370,16 @@ def build_executor(
         dev: Optional development operation runner.
         code: Optional AI code assistant.
         vision: Optional screen and document analyst.
+        conversation: Optional conversational responder.
 
     Returns:
         A ready-to-use executor.
     """
     return CommandExecutor(
         registry=CommandRegistry(build_commands(settings)),
-        context=CommandContext(desktop=desktop, dev=dev, code=code, vision=vision),
+        context=CommandContext(
+            desktop=desktop, dev=dev, code=code, vision=vision, conversation=conversation
+        ),
         settings=settings,
         confirmations=confirmations,
     )

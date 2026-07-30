@@ -16,8 +16,8 @@ from quainex.config.settings import Settings
 from quainex.core.automation.desktop import FileHit, LevelChange, SystemSnapshot
 from quainex.core.brain import Intent, IntentType
 from quainex.core.commands import CommandStatus, build_executor
-from quainex.core.commands.base import Command, CommandOutcome
-from quainex.core.commands.executor import CommandRegistry
+from quainex.core.commands.base import Command, CommandContext, CommandOutcome
+from quainex.core.commands.executor import CommandExecutor, CommandRegistry
 from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
 
 if TYPE_CHECKING:
@@ -120,6 +120,7 @@ def _intent(
     target: str | None = "VS Code",
     *,
     requires_confirmation: bool = False,
+    utterance: str = "",
 ) -> Intent:
     return Intent(
         intent=intent,
@@ -127,7 +128,29 @@ def _intent(
         confidence=0.95,
         reasoning="test",
         requires_confirmation=requires_confirmation,
+        utterance=utterance,
     )
+
+
+class FakeConversationalist:
+    """Records what it was asked and returns a fixed reply.
+
+    Attributes:
+        asked: Every ``(message, kind)`` pair received, so a test can prove the
+            handler passed the right text through.
+    """
+
+    def __init__(self, reply: str = "I'm running fine.") -> None:
+        self.asked: list[tuple[str, IntentType]] = []
+        self._reply = reply
+
+    @property
+    def is_available(self) -> bool:
+        return True
+
+    async def reply(self, *, message: str, kind: IntentType) -> str:
+        self.asked.append((message, kind))
+        return self._reply
 
 
 # -- registry --------------------------------------------------------------
@@ -148,23 +171,134 @@ def test_catalogue_lists_every_registered_command(tmp_path):
 
     assert "open_application" in catalogue
     assert "shutdown" in catalogue
-    # Conversational intents are not executable.
-    assert "small_talk" not in catalogue
-    assert "answer_question" not in catalogue
+
+
+def test_every_intent_the_brain_can_produce_has_a_command(tmp_path):
+    """No classification may be a dead end.
+
+    This test replaces one that asserted the opposite — that the conversational
+    intents were *not* executable. That was the bug, written down as if it were
+    the design: the Brain would correctly classify "how are you doing?" as
+    ``small_talk`` and the executor would answer "'small_talk' is not something
+    Quainex can execute". Accurate, and useless.
+
+    Anything the Brain can return must now be dispatchable, so adding an
+    ``IntentType`` without a handler fails here rather than in front of a user.
+    """
+    catalogue = build_executor(FakeDesktopController(), _settings(tmp_path)).catalogue
+
+    missing = [intent.value for intent in IntentType if intent.value not in catalogue]
+    assert missing == []
 
 
 # -- gate 1: unsupported ---------------------------------------------------
 
 
-async def test_non_executable_intent_is_unsupported(tmp_path):
+async def test_an_unregistered_intent_is_unsupported(tmp_path):
+    """Gate 1 still holds, even though every built-in intent now has a handler.
+
+    Exercised against an empty registry rather than a conversational intent,
+    because the gate's job is to refuse a *dispatch with no implementation* — a
+    plugin registering an intent it does not implement, or an ``IntentType`` added
+    without a command. That the built-in set is now complete does not retire it.
+    """
     desktop = FakeDesktopController()
-    result = await build_executor(desktop, _settings(tmp_path)).execute(
-        _intent(IntentType.SMALL_TALK, target=None)
+    executor = CommandExecutor(
+        registry=CommandRegistry([]),
+        context=CommandContext(desktop=desktop),
+        settings=_settings(tmp_path),
     )
+
+    result = await executor.execute(_intent(IntentType.OPEN_APPLICATION))
 
     assert result.status is CommandStatus.UNSUPPORTED
     assert result.executed is False
     assert desktop.calls == []
+
+
+# -- conversation ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [IntentType.SMALL_TALK, IntentType.ANSWER_QUESTION, IntentType.UNKNOWN],
+)
+async def test_conversational_intents_are_answered_not_refused(tmp_path, kind: IntentType):
+    """The fix, stated as three assertions.
+
+    Each of these used to come back as ``unsupported``. An AI operating system
+    that cannot answer a greeting is broken in the first thirty seconds of use.
+    """
+    conversation = FakeConversationalist("Running fine.")
+    result = await build_executor(
+        FakeDesktopController(), _settings(tmp_path), conversation=conversation
+    ).execute(_intent(kind, target=None, utterance="how are you doing?"))
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert result.message == "Running fine."
+    assert conversation.asked == [("how are you doing?", kind)]
+    # `executed` means "a side effect occurred", and a reply has none. Reporting
+    # True would put "small_talk executed=True" in the audit trail, which reads as
+    # the machine having been changed.
+    assert result.executed is False
+
+
+async def test_a_greeting_with_no_target_still_reaches_the_responder(tmp_path):
+    """``small_talk`` has no target by definition.
+
+    So the handler falls back to the utterance. Registering these commands with
+    ``requires_target=True`` would have reintroduced the same failure at the
+    executor's fourth gate instead of its first — a refusal wearing a new label.
+    """
+    conversation = FakeConversationalist()
+    result = await build_executor(
+        FakeDesktopController(), _settings(tmp_path), conversation=conversation
+    ).execute(_intent(IntentType.SMALL_TALK, target=None, utterance="morning"))
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert conversation.asked[0][0] == "morning"
+
+
+async def test_a_question_prefers_the_extracted_target_over_the_raw_utterance(tmp_path):
+    """The classifier's ``target`` is the question stripped of framing."""
+    conversation = FakeConversationalist()
+    await build_executor(
+        FakeDesktopController(), _settings(tmp_path), conversation=conversation
+    ).execute(
+        _intent(
+            IntentType.ANSWER_QUESTION,
+            target="how tall is Everest",
+            utterance="hey quainex, how tall is Everest?",
+        )
+    )
+
+    assert conversation.asked[0][0] == "how tall is Everest"
+
+
+async def test_a_conversational_reply_cannot_touch_the_desktop(tmp_path):
+    """The reason these handlers reach ``ctx.conversation`` and nothing else.
+
+    A reply claiming "I've opened that for you" when nothing was opened is worse
+    than an error, and the only reliable way to prevent it is to make the action
+    unreachable from the conversational path.
+    """
+    desktop = FakeDesktopController()
+    await build_executor(
+        desktop, _settings(tmp_path), conversation=FakeConversationalist()
+    ).execute(_intent(IntentType.SMALL_TALK, target=None, utterance="open notepad for me"))
+
+    assert desktop.calls == []
+
+
+async def test_conversation_without_a_responder_is_blocked_not_crashed(tmp_path):
+    """A desktop-only executor — most tests — must still refuse cleanly."""
+    result = await build_executor(FakeDesktopController(), _settings(tmp_path)).execute(
+        _intent(IntentType.SMALL_TALK, target=None, utterance="hello")
+    )
+
+    assert result.status is CommandStatus.BLOCKED
+    assert result.executed is False
+    assert "Conversation" in result.message
 
 
 # -- gate 2: confirmation --------------------------------------------------

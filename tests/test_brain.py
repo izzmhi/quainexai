@@ -189,6 +189,57 @@ async def test_conversational_intents_are_not_actionable(tmp_path):
     assert intent.is_actionable is False
 
 
+@pytest.mark.parametrize(
+    "intent_type",
+    [IntentType.SMALL_TALK, IntentType.ANSWER_QUESTION, IntentType.UNKNOWN],
+)
+async def test_a_conversational_intent_is_never_gated_however_unsure_the_model_is(
+    tmp_path, intent_type: IntentType
+):
+    """Confirmation exists to guard side effects. A reply has none.
+
+    Before this exemption, gibberish classified as ``unknown`` with 0.0 confidence
+    produced *"Confirm: unknown?"* — a prompt asking permission for nothing.
+
+    That is not merely untidy. Confirmation only protects anything if the user
+    reads it, and a system that asks "are you sure?" about a greeting teaches them
+    to click yes without looking. The one time it matters — powering the machine
+    off — they would click straight through.
+    """
+    provider = FakeProvider(_classification(intent=intent_type, target=None, confidence=0.0))
+
+    intent = await _brain(provider, tmp_path, threshold=0.9).interpret("asdkjh qwe zxcv")
+
+    assert intent.requires_confirmation is False
+
+
+async def test_the_exemption_does_not_extend_to_actions(tmp_path):
+    """The low-confidence gate must still hold for anything with an effect.
+
+    Stated as its own test so that widening ``NON_ACTIONABLE`` by accident — the
+    one change that would quietly disarm the gate — fails here.
+    """
+    provider = FakeProvider(
+        _classification(intent=IntentType.OPEN_APPLICATION, target="something", confidence=0.1)
+    )
+
+    intent = await _brain(provider, tmp_path, threshold=0.9).interpret("uh, that thing")
+
+    assert intent.requires_confirmation is True
+
+
+async def test_the_utterance_is_carried_through_for_a_handler_to_reply_to(tmp_path):
+    """``small_talk`` has no target, so the utterance is all a handler has."""
+    provider = FakeProvider(
+        _classification(intent=IntentType.SMALL_TALK, target=None, confidence=0.9)
+    )
+
+    intent = await _brain(provider, tmp_path).interpret("  how are you doing?  ")
+
+    assert intent.utterance == "how are you doing?"
+    assert intent.subject == "how are you doing?"
+
+
 # -- input validation ------------------------------------------------------
 
 

@@ -7,6 +7,8 @@ objects for the Phase 3 command registry to dispatch on.
 from quainex.core.brain.brain import Brain
 from quainex.core.brain.schemas import (
     CONFIRMATION_REQUIRED,
+    INTENT_DESCRIPTIONS,
+    NON_ACTIONABLE,
     Intent,
     IntentClassification,
     IntentParameter,
@@ -15,6 +17,8 @@ from quainex.core.brain.schemas import (
 
 __all__ = [
     "CONFIRMATION_REQUIRED",
+    "INTENT_DESCRIPTIONS",
+    "NON_ACTIONABLE",
     "Brain",
     "Intent",
     "IntentClassification",

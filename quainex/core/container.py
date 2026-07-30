@@ -55,6 +55,7 @@ from quainex.core.agent import AutonomousAgent
 from quainex.core.automation import WindowsDesktopController
 from quainex.core.brain import Brain
 from quainex.core.commands import CommandExecutor, build_executor
+from quainex.core.conversation import Conversationalist
 from quainex.core.devtools import CodeAssistant, DevRunner
 from quainex.core.exceptions import ConfigurationError
 from quainex.core.logging import configure_logging, get_logger
@@ -114,6 +115,7 @@ class Container:
         rate_limiter: Per-client request throttle.
         dev: Runs allowlisted development operations.
         code: AI-backed code explanation, review and generation.
+        conversation: Replies for questions, greetings and unrecognised requests.
         vision: Screen and document understanding.
         plugins: Discovers and dispatches to installed plugins.
         agent: Plans and carries out goals within a budget.
@@ -134,6 +136,7 @@ class Container:
     rate_limiter: RateLimiter
     dev: DevRunner
     code: CodeAssistant
+    conversation: Conversationalist
     vision: ScreenAnalyst
     plugins: PluginRegistry
     agent: AutonomousAgent
@@ -197,6 +200,16 @@ class Container:
         dev = DevRunner(resolved)
         code = CodeAssistant(ai_provider, resolved)
         vision = ScreenAnalyst(ai_provider, desktop, resolved)
+        # Memory is built before the executor because the conversational commands
+        # need it: a reply with no access to recent turns cannot resolve a
+        # follow-up like "and what about tomorrow?".
+        #
+        # The engine is created here but the schema is not: DDL is async, so it
+        # happens in `start()` during the application lifespan.
+        database = Database.create(resolved)
+        memory = MemoryManager(SqlAlchemyMemoryStore(database), resolved)
+        conversation = Conversationalist(ai_provider, resolved, memory)
+
         commands = build_executor(
             desktop=desktop,
             settings=resolved,
@@ -204,6 +217,7 @@ class Container:
             dev=dev,
             code=code,
             vision=vision,
+            conversation=conversation,
         )
 
         tokens = (
@@ -212,11 +226,6 @@ class Container:
             else None
         )
         rate_limiter = RateLimiter(resolved.rate_limit_per_minute)
-
-        # The engine is created here but the schema is not: DDL is async, so it
-        # happens in `start()` during the application lifespan.
-        database = Database.create(resolved)
-        memory = MemoryManager(SqlAlchemyMemoryStore(database), resolved)
 
         # Voice components are constructed unconditionally but load nothing:
         # the Whisper model is fetched on first use, so a missing or undownloaded
@@ -275,6 +284,7 @@ class Container:
             rate_limiter=rate_limiter,
             dev=dev,
             code=code,
+            conversation=conversation,
             vision=vision,
             plugins=plugins,
             agent=agent,
@@ -394,7 +404,21 @@ class Container:
                             base_url=settings.groq_base_url if key else "",
                             model=settings.groq_model,
                             api_key=key,
-                            max_tokens=settings.ai_max_tokens,
+                            # Free-tier cap: see `ai_max_tokens_free_tier`. Asking
+                            # for the full budget here spends a whole minute's
+                            # quota on one call.
+                            max_tokens=settings.ai_max_tokens_free_tier,
+                        )
+                    )
+                case AIProviderName.OPENROUTER:
+                    key = _secret(settings.openrouter_api_key)
+                    chain.append(
+                        OpenAICompatibleProvider(
+                            name="openrouter",
+                            base_url=settings.openrouter_base_url if key else "",
+                            model=settings.openrouter_model,
+                            api_key=key,
+                            max_tokens=settings.ai_max_tokens_free_tier,
                         )
                     )
                 case AIProviderName.LOCAL:
@@ -406,6 +430,8 @@ class Container:
                             base_url=settings.local_base_url,
                             model=settings.local_model,
                             api_key=_secret(settings.local_api_key),
+                            # Your own machine has no per-minute quota to fit
+                            # inside, so the full budget applies here.
                             max_tokens=settings.ai_max_tokens,
                         )
                     )

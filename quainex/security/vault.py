@@ -87,6 +87,7 @@ STORABLE_SECRETS: frozenset[str] = frozenset(
     {
         "groq_api_key",
         "gemini_api_key",
+        "openrouter_api_key",
         "anthropic_api_key",
         "local_api_key",
         "telegram_bot_token",
