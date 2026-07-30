@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -92,6 +93,13 @@ _MAX_MESSAGE_CHARS = 3900
 #: How long to hold a long-poll open. Telegram returns early when something
 #: arrives, so a long timeout costs nothing and avoids a busy loop.
 _POLL_TIMEOUT_SECONDS = 25
+
+#: Ceiling on remembered senders. Bounded so that an unauthorised sender cannot
+#: grow this without limit simply by messaging repeatedly.
+_MAX_SEEN_SENDERS = 20
+
+#: Telegram's response when a second instance polls the same bot.
+_HTTP_CONFLICT = 409
 
 
 class TelegramUpdate(BaseModel):
@@ -147,6 +155,16 @@ class TelegramBridge:
         #: Confirmation tokens keyed by a short id, because Telegram limits
         #: callback_data to 64 bytes and a signed token is far longer.
         self._pending: dict[str, tuple[Intent, str]] = {}
+        #: When the last poll returned. Observed rather than declared — see
+        #: ``status``, where a boolean flag alone turned out to be a liability.
+        self._last_poll_at: float | None = None
+        #: Everyone who has messaged the bot this session, authorised or not.
+        #:
+        #: Recorded here so that setup can offer candidate user ids *without*
+        #: calling ``getUpdates`` — see ``diagnose`` for why that call is unsafe
+        #: while the bridge is polling. Bounded, because an unauthorised sender
+        #: must not be able to grow this without limit by messaging repeatedly.
+        self._seen_senders: dict[int, dict[str, object]] = {}
 
     @property
     def is_configured(self) -> bool:
@@ -161,12 +179,23 @@ class TelegramBridge:
     def status(self) -> dict[str, object]:
         """Report bridge state for the API and for diagnostics.
 
+        ``running`` is a flag somebody set; ``last_poll_seconds_ago`` is something
+        that actually happened. The distinction is not academic — a poll loop can
+        stall or die while the flag still says ``True``, and chasing "it says it is
+        running but nothing arrives" without a real timestamp is guesswork. A value
+        under about 30 seconds means the loop is genuinely alive.
+
         Returns:
             Configuration and run state.
         """
         return {
             "configured": self.is_configured,
             "running": self._running,
+            "last_poll_seconds_ago": (
+                None
+                if self._last_poll_at is None
+                else round(time.monotonic() - self._last_poll_at, 1)
+            ),
             "allowed_users": len(self._settings.telegram_allowed_users),
             "blocked_intents": sorted(i.value for i in TELEGRAM_BLOCKED_INTENTS),
         }
@@ -175,13 +204,18 @@ class TelegramBridge:
         """Poll Telegram until stopped.
 
         Raises:
-            RuntimeError: The bridge is not configured.
+            RuntimeError: The bridge is not configured, or already polling.
         """
         if not self.is_configured:
             raise RuntimeError(
                 "Telegram is not configured. Set QUAINEX_TELEGRAM_BOT_TOKEN and "
                 "QUAINEX_TELEGRAM_ALLOWED_USERS."
             )
+        if self._running:
+            # Two loops on one bridge would 409 each other exactly as two processes
+            # do. Refusing here makes a double-start a caught mistake rather than a
+            # mystery.
+            raise RuntimeError("This bridge is already polling.")
 
         self._running = True
         _log.info(
@@ -194,6 +228,32 @@ class TelegramBridge:
                 try:
                     for update in await self._poll(client):
                         await self._dispatch(client, update)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response.status_code == _HTTP_CONFLICT:
+                        # 409 means another instance of this bot is polling, and
+                        # retrying cannot fix that — the two simply terminate each
+                        # other's long poll forever. Every poll fails, so messages
+                        # arrive erratically or not at all, while the bridge still
+                        # reports itself as running.
+                        #
+                        # That is precisely how a leftover process turned into hours
+                        # of debugging. Retrying a conflict is not resilience; it is
+                        # a busy loop that hides a configuration error. So this one
+                        # status stops the loop and says what to do about it.
+                        _log.error(
+                            "telegram_conflict",
+                            detail=(
+                                "Another Quainex (or another program using this bot "
+                                "token) is already polling Telegram. Telegram allows "
+                                "only one. Stopping this bridge. Check for a leftover "
+                                "process: Get-Process python*, or "
+                                "Stop-ScheduledTask -TaskName 'Quainex Server'."
+                            ),
+                        )
+                        self._running = False
+                        break
+                    _log.warning("telegram_poll_failed", error=str(exc))
+                    await asyncio.sleep(5)
                 except httpx.HTTPError as exc:
                     # A network blip must not end the bridge; back off and retry.
                     _log.warning("telegram_poll_failed", error=str(exc))
@@ -224,8 +284,20 @@ class TelegramBridge:
         themselves control of your machine. The list is shown so a human picks
         from it; nothing is authorised until they do.
 
-        Reads with ``offset=-1`` and does not advance the offset, so a pending
-        message is still delivered normally once polling starts.
+        **Does not call ``getUpdates`` while the bridge is polling.** Telegram
+        permits exactly one ``getUpdates`` per bot and terminates the loser with
+        *409 Conflict* — so a "check my bot" button that polls would kill the very
+        thing it is reporting on. That is not hypothetical: it is what produced a
+        run of ``telegram_poll_failed`` entries and made a healthy bridge look
+        broken every time the button was pressed.
+
+        So while polling, candidates come from senders the bridge has already seen
+        (``_seen_senders``), which is strictly better information anyway — it is
+        drawn from the whole session rather than one pending update. Only when the
+        bridge is *stopped* does this call ``getUpdates`` directly, with
+        ``offset=-1`` so a pending message is still delivered later.
+
+        ``getMe`` is always safe: it does not touch the update queue.
 
         Returns:
             ``ok``, the bot's ``username``, ``candidates``, and ``error`` on
@@ -250,12 +322,16 @@ class TelegramBridge:
                 me.raise_for_status()
                 username = str((me.json().get("result") or {}).get("username") or "")
 
-                # `offset=-1` returns only the most recent update and leaves the
-                # queue intact, so this diagnostic cannot swallow a real message.
-                updates = await client.get(
-                    f"{self._url()}/getUpdates", params={"offset": -1, "timeout": 0}
-                )
-                candidates = _senders(updates.json().get("result", []))
+                if self._running:
+                    # Never poll here: it would terminate the bridge's own poll.
+                    candidates = list(self._seen_senders.values())
+                else:
+                    # `offset=-1` returns only the most recent update and leaves
+                    # the queue intact, so nothing is swallowed.
+                    updates = await client.get(
+                        f"{self._url()}/getUpdates", params={"offset": -1, "timeout": 0}
+                    )
+                    candidates = _senders(updates.json().get("result", []))
         except httpx.HTTPError as exc:
             return {"ok": False, "error": f"Could not reach Telegram: {exc}", "candidates": []}
 
@@ -279,13 +355,30 @@ class TelegramBridge:
         )
         response.raise_for_status()
         payload = response.json()
+        self._last_poll_at = time.monotonic()
 
         updates: list[TelegramUpdate] = []
         for raw in payload.get("result", []):
+            self._remember_sender(raw)
             update = _parse_update(raw)
             self._offset = max(self._offset, update.update_id + 1)
             updates.append(update)
         return updates
+
+    def _remember_sender(self, raw: dict[str, Any]) -> None:
+        """Note who sent an update, for the setup screen.
+
+        Recorded before authorisation is checked, deliberately: the whole point is
+        to show an unconfigured user their own id, and at that moment they are not
+        on the allowlist yet. Nothing is granted by appearing here.
+
+        Args:
+            raw: The update as Telegram sent it.
+        """
+        for candidate in _senders([raw]):
+            user_id = candidate["user_id"]
+            if isinstance(user_id, int) and len(self._seen_senders) < _MAX_SEEN_SENDERS:
+                self._seen_senders.setdefault(user_id, candidate)
 
     async def _dispatch(self, client: httpx.AsyncClient, update: TelegramUpdate) -> None:
         """Route one update.

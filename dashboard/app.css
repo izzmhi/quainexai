@@ -1116,6 +1116,18 @@ input[type="text"].field:focus {
   border-top: 1px solid var(--line-soft);
 }
 
+/* ---- Speech toggle. The waves fade rather than vanish when muted: an icon that
+   loses half its shape reads as a different icon. */
+
+.icon-button[data-on="true"] {
+  color: var(--accent);
+  border-color: var(--accent-deep);
+}
+
+.icon-button[data-on="false"] [data-bind="speechWaves"] {
+  opacity: 0.25;
+}
+
 .tg-candidates p {
   flex-basis: 100%;
   margin: 0;

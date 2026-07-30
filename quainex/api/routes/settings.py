@@ -357,6 +357,10 @@ class TelegramState(BaseModel):
             not one you can trust.
         configured: Whether both halves are present. Polling is refused otherwise.
         running: Whether the bridge is currently polling.
+        last_poll_seconds_ago: How long since a poll actually returned, or ``None``
+            if none has. ``running`` is a flag; this is evidence. A stalled loop
+            reports ``running: true`` forever, and without this there is no way to
+            tell that apart from a healthy one.
         blocked_intents: Commands the bridge refuses regardless of who asks.
         missing: What is still needed, in plain words. Present so the dashboard
             never has to show "not configured" without saying why.
@@ -366,6 +370,7 @@ class TelegramState(BaseModel):
     allowed_users: list[int]
     configured: bool
     running: bool
+    last_poll_seconds_ago: float | None = None
     blocked_intents: list[str]
     missing: list[str]
 
@@ -404,11 +409,13 @@ def _telegram_state(container: Container) -> TelegramState:
     if not allowed:
         missing.append("at least one user id from @userinfobot")
 
+    last_poll = bridge.status().get("last_poll_seconds_ago")
     return TelegramState(
         token_configured=has_token,
         allowed_users=allowed,
         configured=bridge.is_configured,
         running=bridge.is_running,
+        last_poll_seconds_ago=last_poll if isinstance(last_poll, (int, float)) else None,
         # Read from the constant rather than out of `bridge.status()`, whose values
         # are typed `object` — the type would have to be asserted away, and the
         # constant is the actual source of truth.

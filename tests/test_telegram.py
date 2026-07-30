@@ -7,8 +7,10 @@ refused, and that a confirmation still has to be a real one.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import httpx
 import pytest
 
 from quainex.config.settings import Settings
@@ -131,6 +133,132 @@ def test_status_reports_what_is_blocked(tmp_path):
     assert "look_at_screen" in status["blocked_intents"]
 
 
+# -- diagnostics must not break the thing they diagnose --------------------
+
+
+class _OkResponse:
+    """Minimal stand-in for a successful Telegram response."""
+
+    status_code = 200
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return {"ok": True, "result": {}}
+
+
+async def test_diagnose_does_not_poll_while_the_bridge_is_running(tmp_path, monkeypatch):
+    """Telegram allows one ``getUpdates`` per bot and 409s the loser.
+
+    So a "check my bot" button that polls terminates the bridge's own long poll —
+    which is exactly what happened: pressing it produced a run of
+    ``telegram_poll_failed`` entries and made a healthy bridge look broken.
+    """
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    bridge._running = True
+    bridge._seen_senders = {ALLOWED_USER: {"user_id": ALLOWED_USER, "name": "Sam", "username": ""}}
+
+    requested: list[str] = []
+
+    class SpyClient:
+        async def __aenter__(self) -> SpyClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, url: str, **_: object) -> _OkResponse:
+            requested.append(url.rsplit("/", 1)[-1])
+            return _OkResponse()
+
+    monkeypatch.setattr("quainex.integrations.telegram.httpx.AsyncClient", lambda **_: SpyClient())
+
+    result = await bridge.diagnose()
+
+    assert "getMe" in requested
+    assert "getUpdates" not in requested
+    # Candidates still come back — from what the bridge has already seen, which is
+    # better information than one pending update anyway.
+    assert result["candidates"] == [{"user_id": ALLOWED_USER, "name": "Sam", "username": ""}]
+
+
+async def test_a_conflict_stops_the_loop_instead_of_retrying_forever(tmp_path, monkeypatch):
+    """409 means another instance is polling, and retrying cannot fix that.
+
+    The two simply terminate each other's long poll forever: every poll fails,
+    messages arrive erratically or not at all, and the bridge still reports itself
+    as running. That is exactly how one leftover process became hours of
+    debugging — the log filled with `telegram_poll_failed` and nothing said why.
+
+    Retrying a conflict is not resilience. It is a busy loop hiding a
+    configuration error, so this one status is terminal and says what to do.
+    """
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+
+    class ConflictClient:
+        def __init__(self) -> None:
+            self.polls = 0
+
+        async def __aenter__(self) -> ConflictClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def get(self, url: str, **_: object) -> httpx.Response:
+            self.polls += 1
+            request = httpx.Request("GET", url)
+            response = httpx.Response(409, request=request, text="Conflict")
+            raise httpx.HTTPStatusError("conflict", request=request, response=response)
+
+    client = ConflictClient()
+    monkeypatch.setattr("quainex.integrations.telegram.httpx.AsyncClient", lambda **_: client)
+
+    # Completes rather than hanging: the conflict ends the loop.
+    await asyncio.wait_for(bridge.run(), timeout=5)
+
+    assert bridge.is_running is False
+    # Once, not in a retry loop.
+    assert client.polls == 1
+
+
+async def test_starting_a_bridge_twice_is_refused(tmp_path):
+    """Two loops on one bridge would 409 each other exactly as two processes do."""
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    bridge._running = True
+
+    with pytest.raises(RuntimeError, match="already polling"):
+        await bridge.run()
+
+
+def test_status_reports_observed_liveness_not_only_a_flag(tmp_path):
+    """A stalled loop reports ``running: true`` forever.
+
+    Without a real timestamp there is no way to tell that apart from a healthy
+    bridge, which is how "it says it is running but nothing arrives" became
+    guesswork.
+    """
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+
+    assert bridge.status()["last_poll_seconds_ago"] is None
+
+    bridge._last_poll_at = 100.0
+    observed = bridge.status()["last_poll_seconds_ago"]
+    assert isinstance(observed, float)
+
+
+def test_remembered_senders_are_bounded(tmp_path):
+    """An unauthorised sender must not grow this by messaging repeatedly."""
+    from quainex.integrations.telegram import _MAX_SEEN_SENDERS
+
+    bridge = _bridge(tmp_path)
+    for user_id in range(_MAX_SEEN_SENDERS + 10):
+        bridge._remember_sender({"update_id": user_id, "message": {"from": {"id": 1000 + user_id}}})
+
+    assert len(bridge._seen_senders) == _MAX_SEEN_SENDERS
+
+
 # -- failures must be visible on the phone ---------------------------------
 
 
@@ -149,18 +277,6 @@ class SendRecorder:
         if isinstance(json_body, dict):
             self.sent.append(str(json_body.get("text", "")))
         return _OkResponse()
-
-
-class _OkResponse:
-    """Minimal stand-in for a successful Telegram response."""
-
-    status_code = 200
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self) -> dict[str, object]:
-        return {"ok": True, "result": {}}
 
 
 async def test_a_provider_failure_is_reported_to_the_chat_not_only_the_log(tmp_path):

@@ -495,10 +495,14 @@ function renderResult(intent, result) {
     state.pending = { intent, token: result.confirmation_token };
     openConfirm(result.message);
     core.set("idle", "Waiting for you to confirm.");
+    // Spoken too: a confirmation you have not noticed is a request that appears to
+    // have been ignored, and the mic path means you may not be looking at the tab.
+    void speak(result.message);
     return;
   }
 
   core.set(result.status === "succeeded" ? "idle" : "error");
+  void speak(result.message);
 }
 
 /**
@@ -545,6 +549,7 @@ async function acceptConfirm() {
       error: result.status !== "succeeded",
     });
     core.set(result.status === "succeeded" ? "idle" : "error");
+    void speak(result.message);
   } catch (error) {
     addTurn({ role: "assistant", text: error.message, meta: "failed", error: true });
     core.set("error");
@@ -763,11 +768,20 @@ function renderTelegram(state) {
 
   // The status says *why* it is off, not just that it is. "Not configured" with
   // no explanation is the reason this feature went unused.
-  const [tag, text] = state.running
-    ? ["tag--ok", "Polling. Message your bot from your phone."]
-    : state.configured
-      ? ["tag--warn", "Ready, but not polling. Press Start."]
-      : ["tag--bad", `Off — still needs ${state.missing.join(" and ")}.`];
+  // `running` is a flag; `last_poll_seconds_ago` is evidence. A stalled loop
+  // reports running forever, so a stale timestamp is reported as a stall rather
+  // than shown as healthy.
+  const stalled = state.running && state.last_poll_seconds_ago > 60;
+  const [tag, text] = stalled
+    ? [
+        "tag--bad",
+        `Says it is polling, but the last poll was ${Math.round(state.last_poll_seconds_ago)}s ago. Press Stop then Start.`,
+      ]
+    : state.running
+      ? ["tag--ok", "Polling. Message your bot from your phone."]
+      : state.configured
+        ? ["tag--warn", "Ready, but not polling. Press Start."]
+        : ["tag--bad", `Off — still needs ${state.missing.join(" and ")}.`];
 
   host.replaceChildren(
     el("span", { class: `tag ${tag}`, text: state.running ? "live" : "off" }),
@@ -1142,6 +1156,57 @@ function openLink() {
   }, 20000);
 }
 
+/* ------------------------------------------------------------------ speech */
+
+/** Where the preference lives. Persistent, unlike the access token. */
+const SPEECH_KEY = "quainex.speech";
+
+/** @returns {boolean} Whether replies should be spoken. */
+const speechEnabled = () => localStorage.getItem(SPEECH_KEY) === "on";
+
+/**
+ * Speak a reply on the host machine's speakers.
+ *
+ * Server-side rather than the browser's `speechSynthesis`, deliberately. Quainex
+ * runs on *this* machine and answers about it; the voice should come out of its
+ * speakers, the same ones the voice loop and the wake word already use. Browser
+ * synthesis would also make the assistant silent whenever the tab was closed,
+ * which is precisely when a spoken answer is most useful.
+ *
+ * @param {string} text What to say.
+ */
+async function speak(text) {
+  if (!speechEnabled() || !text.trim()) return;
+  core.set("speaking");
+  try {
+    await api("/voice/say", { method: "POST", body: { text } });
+  } catch {
+    // Speech is an enhancement. A failure here must not make a successful command
+    // look failed, so it is swallowed rather than surfaced as an error turn.
+  } finally {
+    core.set("idle");
+  }
+}
+
+/** Turn speech output on or off, remembering the choice. */
+function toggleSpeech() {
+  const next = speechEnabled() ? "off" : "on";
+  localStorage.setItem(SPEECH_KEY, next);
+  renderSpeechToggle();
+  toast(next === "on" ? "Quainex will speak its replies." : "Speech output off.", "good");
+  if (next === "on") void speak("Speech output is on.");
+}
+
+/** Reflect the speech preference in the toolbar. */
+function renderSpeechToggle() {
+  const button = bind("speechToggle");
+  if (!button) return;
+  const on = speechEnabled();
+  button.dataset.on = String(on);
+  button.setAttribute("aria-pressed", String(on));
+  button.title = on ? "Speech on - click to mute" : "Speak replies aloud on this machine";
+}
+
 /* ------------------------------------------------------------------- theme */
 
 /** Toggle between the dark and light palettes, remembering the choice. */
@@ -1185,6 +1250,7 @@ function boot() {
     }
   }
 
+  document.querySelector('[data-action="speech"]')?.addEventListener("click", toggleSpeech);
   document.querySelector('[data-action="theme"]')?.addEventListener("click", toggleTheme);
   document.querySelector('[data-action="refresh-history"]')?.addEventListener("click", loadHistory);
   document
@@ -1227,6 +1293,7 @@ function boot() {
     if (event.key === "Escape" && !bind("confirmBackdrop")?.hidden) closeConfirm();
   });
 
+  renderSpeechToggle();
   core.set("idle");
   core.start();
   navigate("console");

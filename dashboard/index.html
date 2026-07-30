@@ -46,6 +46,25 @@
         <span class="pill" data-bind="linkPill" title="Live connection to Quainex">
           <i class="dot" data-state="unknown"></i><span data-bind="linkName">link</span>
         </span>
+        <!--
+          Speech output. Off by default: a page that starts talking the moment it
+          loads is startling, and the machine may not be somewhere you can hear it.
+          The choice is remembered.
+        -->
+        <button
+          class="icon-button"
+          data-action="speech"
+          data-bind="speechToggle"
+          data-on="false"
+          title="Speak replies aloud on this machine"
+          aria-label="Speak replies aloud"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9v6h3l5 4V5L7 9H4z"/>
+            <path data-bind="speechWaves" d="M16 8.5a5 5 0 010 7M18.5 6a8 8 0 010 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
         <button class="icon-button" data-action="theme" title="Switch theme" aria-label="Switch theme">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 109 9 7 7 0 01-9-9z"/></svg>
         </button>
