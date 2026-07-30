@@ -76,6 +76,24 @@
   box-sizing: border-box;
 }
 
+/*
+ * `hidden` must win over every rule in this file.
+ *
+ * The browser's own stylesheet says `[hidden] { display: none }`, but that is a
+ * user-agent rule: any author rule that sets `display` beats it. So a component
+ * styled `display: grid` — the modal backdrop, the console view — stays visible
+ * with the attribute set, and `element.hidden = true` in app.js silently does
+ * nothing. That produced a confirmation dialog visible on page load whose buttons
+ * appeared dead, because closing it was a no-op.
+ *
+ * `!important` is the right tool exactly once, here: visibility is controlled by
+ * this attribute throughout, so no component rule may outrank it. Anything that
+ * needs to be laid out is styled on top of this, not around it.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
