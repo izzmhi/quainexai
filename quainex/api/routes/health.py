@@ -39,18 +39,36 @@ from quainex.api.dependencies import ContainerDep
 router = APIRouter(tags=["system"])
 
 
-class AIStatus(BaseModel):
-    """State of the configured AI provider.
+class ProviderStatus(BaseModel):
+    """One provider's position in the fallback chain.
 
     Attributes:
-        provider: Name of the active provider implementation.
-        available: Whether it holds the credentials needed to serve requests.
-        model: The model identifier it will call.
+        name: Provider and model, e.g. ``groq/llama-3.3-70b-versatile``.
+        available: Whether it is configured enough to be tried.
+        order: Position in the chain; lower is tried first.
+    """
+
+    name: str
+    available: bool
+    order: int
+
+
+class AIStatus(BaseModel):
+    """State of the configured AI provider chain.
+
+    Attributes:
+        provider: Name of the active chain.
+        available: Whether *any* provider in the chain can serve requests.
+        model: The Anthropic model identifier, kept for backwards compatibility.
+        providers: Every provider in preference order, configured or not. The
+            settings page renders this, so unconfigured entries must remain
+            visible rather than being filtered away.
     """
 
     provider: str
     available: bool
     model: str
+    providers: list[ProviderStatus] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -88,6 +106,11 @@ async def health(request: Request, container: ContainerDep) -> HealthResponse:
     started_at = getattr(request.app.state, "started_at", None)
     uptime = time.monotonic() - started_at if isinstance(started_at, float) else 0.0
 
+    # `describe()` belongs to FallbackProvider, not to the AIProvider protocol —
+    # a bare provider is still valid here, so the list is simply empty for one.
+    describe = getattr(container.ai_provider, "describe", None)
+    providers = [ProviderStatus(**entry) for entry in describe()] if callable(describe) else []
+
     return HealthResponse(
         app=settings.app_name,
         version=settings.version,
@@ -97,5 +120,6 @@ async def health(request: Request, container: ContainerDep) -> HealthResponse:
             provider=container.ai_provider.name,
             available=container.ai_provider.is_available,
             model=settings.ai_model,
+            providers=providers,
         ),
     )

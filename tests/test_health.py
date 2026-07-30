@@ -24,9 +24,17 @@ def test_health_returns_ok(client: TestClient):
 def test_health_reports_ai_unavailable_without_a_key(client: TestClient):
     # The whole point: no credentials must not make the process look unhealthy.
     body = client.get("/health").json()
-    assert body["ai"]["provider"] == "anthropic"
     assert body["ai"]["available"] is False
     assert body["status"] == "ok"
+
+
+def test_health_lists_every_provider_in_the_chain(client: TestClient):
+    # The settings page reads this to show which keys are missing, so an
+    # unconfigured provider must still appear rather than vanish from the list.
+    names = [entry["name"] for entry in client.get("/health").json()["ai"]["providers"]]
+    assert any(name.startswith("groq/") for name in names)
+    assert any(name.startswith("gemini/") for name in names)
+    assert any(name.startswith("anthropic") for name in names)
 
 
 def test_response_carries_a_correlation_id(client: TestClient):

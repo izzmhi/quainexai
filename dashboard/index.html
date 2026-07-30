@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Quainex</title>
+    <link rel="stylesheet" href="./app.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%2338e8d0' stroke-width='2.5'/%3E%3Cpath d='M20 20l6 6' stroke='%2338e8d0' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <!--
+      The whole dashboard is one document with panels swapped by a router in
+      app.js. It is deliberately dependency-free: no framework, no build step, no
+      CDN. Quainex is a local application, so a page that works from a cold
+      `python main.py` with no network and no npm is worth more than a component
+      model. See dashboard/README.md for when that trade stops paying.
+    -->
+
+    <div class="scanlines" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-text">
+          <strong>QUAINEX</strong>
+          <small data-bind="tagline">personal ai operating system</small>
+        </span>
+      </div>
+
+      <nav class="tabs" aria-label="Sections">
+        <button class="tab" data-route="console" aria-current="page">Console</button>
+        <button class="tab" data-route="history">History</button>
+        <button class="tab" data-route="commands">Commands</button>
+        <button class="tab" data-route="settings">Settings</button>
+      </nav>
+
+      <div class="status-cluster">
+        <span class="pill" data-bind="providerPill" title="Active AI provider chain">
+          <i class="dot" data-state="unknown"></i><span data-bind="providerName">checking…</span>
+        </span>
+        <span class="pill" data-bind="linkPill" title="Live connection to Quainex">
+          <i class="dot" data-state="unknown"></i><span data-bind="linkName">link</span>
+        </span>
+        <button class="icon-button" data-action="theme" title="Switch theme" aria-label="Switch theme">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 109 9 7 7 0 01-9-9z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ===================== CONSOLE ===================== -->
+    <main class="view" data-view="console">
+      <section class="stage">
+        <!--
+          The reactive core. Its `data-state` attribute is the single input:
+          idle | listening | thinking | speaking | error. Every ring, glow and
+          timing in app.css is driven off that one attribute, so app.js never
+          touches a style property and the two files cannot drift.
+        -->
+        <div class="core" data-bind="core" data-state="idle" role="img" aria-label="Quainex core">
+          <div class="core-ring core-ring--outer"></div>
+          <div class="core-ring core-ring--mid"></div>
+          <div class="core-ring core-ring--inner"></div>
+          <div class="core-orb"></div>
+          <div class="core-ticks" aria-hidden="true"></div>
+          <svg class="core-wave" viewBox="0 0 200 60" aria-hidden="true" preserveAspectRatio="none">
+            <polyline data-bind="wave" points="" />
+          </svg>
+        </div>
+
+        <p class="stage-state" data-bind="stateLabel">Standing by</p>
+        <p class="stage-hint" data-bind="stateHint">Type below, or press and hold the mic.</p>
+      </section>
+
+      <section class="transcript" data-bind="transcript" aria-live="polite" aria-label="Conversation">
+        <!-- Turns are appended here by app.js. -->
+      </section>
+
+      <form class="composer" data-bind="composer" autocomplete="off">
+        <button
+          type="button"
+          class="mic"
+          data-bind="mic"
+          title="Hold to speak (records on this machine)"
+          aria-label="Hold to speak"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 15a3.5 3.5 0 003.5-3.5V6a3.5 3.5 0 10-7 0v5.5A3.5 3.5 0 0012 15z"/>
+            <path d="M18 11.5a6 6 0 01-12 0M12 17.5V21M8.5 21h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <input
+          type="text"
+          data-bind="utterance"
+          placeholder="Ask Quainex to do something…"
+          aria-label="What should Quainex do?"
+          maxlength="2000"
+        />
+        <button type="submit" class="send" data-bind="send">
+          <span>Send</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 8 6 8z"/></svg>
+        </button>
+      </form>
+    </main>
+
+    <!-- ===================== HISTORY ===================== -->
+    <main class="view" data-view="history" hidden>
+      <div class="panel-head">
+        <h2>History</h2>
+        <p>
+          Everything Quainex has been asked and everything it did about it. The
+          activity trail is append-only on purpose — an audit log the system can
+          edit is not an audit log.
+        </p>
+        <div class="panel-actions">
+          <button class="ghost" data-action="refresh-history">Refresh</button>
+          <button class="danger-ghost" data-action="clear-conversation">Forget conversation</button>
+        </div>
+      </div>
+
+      <div class="split">
+        <section class="card">
+          <h3>Conversation</h3>
+          <ol class="timeline" data-bind="historyTurns"></ol>
+        </section>
+        <section class="card">
+          <h3>Activity <span class="muted">(read-only)</span></h3>
+          <ol class="timeline" data-bind="historyActivity"></ol>
+        </section>
+      </div>
+    </main>
+
+    <!-- ===================== COMMANDS ===================== -->
+    <main class="view" data-view="commands" hidden>
+      <div class="panel-head">
+        <h2>Capabilities</h2>
+        <p>
+          Everything Quainex is able to do, straight from the executor's own
+          registry. If a command is not on this list, no phrasing will make it run.
+        </p>
+        <div class="panel-actions">
+          <input
+            type="search"
+            data-bind="commandFilter"
+            placeholder="Filter capabilities…"
+            aria-label="Filter capabilities"
+          />
+        </div>
+      </div>
+      <div class="grid" data-bind="commandGrid"></div>
+    </main>
+
+    <!-- ===================== SETTINGS ===================== -->
+    <main class="view" data-view="settings" hidden>
+      <div class="panel-head">
+        <h2>Providers &amp; keys</h2>
+        <p>
+          Free providers are tried first, in the order shown. Keys are encrypted
+          with Windows DPAPI before touching the disk, and nothing here ever
+          reads one back — you can replace a key, never reveal it.
+        </p>
+        <div class="panel-actions">
+          <button class="ghost" data-action="test-providers">Test connection</button>
+          <span class="muted" data-bind="vaultPath"></span>
+        </div>
+      </div>
+
+      <div class="notice" data-bind="vaultNotice" hidden></div>
+
+      <section class="chain" data-bind="chain" aria-label="Provider order"></section>
+
+      <div class="keys" data-bind="keys"></div>
+
+      <div class="panel-head panel-head--tight">
+        <h2>System</h2>
+      </div>
+      <div class="grid grid--stats" data-bind="systemGrid"></div>
+    </main>
+
+    <div class="toasts" data-bind="toasts" aria-live="assertive"></div>
+
+    <!-- Confirmation gate. Shown only for actions Quainex refused pending an
+         explicit yes; the signed token it carries is bound to that one action. -->
+    <div class="modal-backdrop" data-bind="confirmBackdrop" hidden>
+      <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h3 id="confirm-title">Confirm this action</h3>
+        <p data-bind="confirmMessage"></p>
+        <div class="modal-actions">
+          <button class="ghost" data-action="confirm-cancel">Cancel</button>
+          <button class="primary" data-action="confirm-accept">Yes, do it</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

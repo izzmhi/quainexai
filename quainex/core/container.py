@@ -47,6 +47,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pydantic import SecretStr
+
 from quainex.auth import TokenService
 from quainex.config.settings import AIProviderName, Settings, get_settings
 from quainex.core.agent import AutonomousAgent
@@ -62,8 +64,11 @@ from quainex.core.voice import FasterWhisperSTT, MicrophoneRecorder, VoiceSessio
 from quainex.database.engine import Database
 from quainex.integrations import TelegramBridge
 from quainex.plugins import PluginRegistry
-from quainex.security import ConfirmationService, RateLimiter
+from quainex.security import ConfirmationService, CredentialVault, RateLimiter
 from quainex.services.ai.anthropic_provider import AnthropicProvider
+from quainex.services.ai.fallback import FallbackProvider
+from quainex.services.ai.gemini_provider import GeminiProvider
+from quainex.services.ai.openai_compatible import OpenAICompatibleProvider
 from quainex.vision import ScreenAnalyst
 
 if TYPE_CHECKING:
@@ -71,6 +76,22 @@ if TYPE_CHECKING:
 
     from quainex.core.automation import DesktopController
     from quainex.services.ai.provider import AIProvider
+
+
+def _secret(value: SecretStr | None) -> str | None:
+    """Unwrap an optional secret to plain text.
+
+    Args:
+        value: The configured credential, if any.
+
+    Returns:
+        The value, or ``None`` when unset or blank. Blank counts as unset: an
+        empty ``QUAINEX_GROQ_API_KEY=`` in ``.env`` means "no key", not "a key
+        that happens to be the empty string".
+    """
+    if value is None:
+        return None
+    return value.get_secret_value().strip() or None
 
 
 @dataclass(slots=True)
@@ -117,8 +138,16 @@ class Container:
     plugins: PluginRegistry
     agent: AutonomousAgent
     telegram: TelegramBridge
+    #: Settings before vault credentials were overlaid. Kept so a reload can
+    #: re-derive from the original source rather than compounding overlays.
+    _base_settings: Settings | None = None
     #: Handle on the polling task, so shutdown can cancel it.
     _telegram_task: asyncio.Task[None] | None = None
+
+    @property
+    def base_settings(self) -> Settings:
+        """Settings as parsed from the environment, before vault credentials."""
+        return self._base_settings if self._base_settings is not None else self.settings
 
     @classmethod
     def create(cls, settings: Settings | None = None) -> Container:
@@ -137,9 +166,16 @@ class Container:
         Raises:
             ConfigurationError: The configured AI provider has no implementation.
         """
-        resolved = settings or get_settings()
-        configure_logging(resolved)
-        logger = get_logger("quainex", app=resolved.app_name, version=resolved.version)
+        base = settings or get_settings()
+        configure_logging(base)
+        logger = get_logger("quainex", app=base.app_name, version=base.version)
+
+        # Credentials come from two places: the .env file, and the encrypted vault
+        # the dashboard writes to. Merging happens here, in the composition root,
+        # because "where configuration comes from" is precisely this module's job —
+        # no component downstream should know there is more than one source.
+        vault = CredentialVault(base.credentials_path)
+        resolved = cls._apply_vault(base, vault)
 
         ai_provider = cls._build_ai_provider(resolved)
         brain = Brain(provider=ai_provider, settings=resolved)
@@ -243,6 +279,7 @@ class Container:
             plugins=plugins,
             agent=agent,
             telegram=telegram,
+            _base_settings=base,
         )
 
     async def start(self) -> None:
@@ -261,25 +298,121 @@ class Container:
             self.logger.info("telegram_autostarted")
 
     @staticmethod
-    def _build_ai_provider(settings: Settings) -> AIProvider:
-        """Select and construct the AI provider implementation.
+    def _apply_vault(settings: Settings, vault: CredentialVault) -> Settings:
+        """Overlay vault-stored credentials onto the settings.
+
+        The vault wins over ``.env``. That direction is chosen on purpose: if
+        ``.env`` took precedence, typing a key into the dashboard would appear to
+        succeed and quietly do nothing, which is the worse of the two surprises.
+        The settings API reports which source each key came from, so the
+        precedence is visible rather than mysterious.
 
         Args:
-            settings: Configuration naming the desired provider.
+            settings: Settings parsed from the environment and ``.env``.
+            vault: The credential store to overlay.
 
         Returns:
-            The constructed provider.
+            Either the original settings, or a copy carrying the stored secrets.
+        """
+        stored = vault.load()
+        if not stored:
+            return settings
+
+        # `model_copy` rather than re-validating: these fields have no validators
+        # of their own, and re-running `Settings(...)` here would re-execute the
+        # startup invariants — including the one that refuses to boot exposed
+        # without credentials — against a half-built object.
+        #
+        # Values are wrapped in `SecretStr` rather than passed as plain strings.
+        # `model_copy` does not coerce, so an unwrapped string would sit in a field
+        # typed `SecretStr | None` and break every reader of it, including the
+        # `has_ai_credentials` computed field.
+        return settings.model_copy(
+            update={name: SecretStr(value) for name, value in stored.items()}
+        )
+
+    async def reload_ai_providers(self) -> None:
+        """Rebuild the AI provider chain from the vault, without a restart.
+
+        Called after the dashboard saves or clears a key. The chain object's
+        identity is preserved — see ``FallbackProvider.replace`` — so the Brain,
+        agent, plugins and vision analyst pick up the change without being
+        reconstructed, and no in-flight request sees a half-swapped container.
 
         Raises:
-            ConfigurationError: The named provider has no implementation.
+            ConfigurationError: A configured provider name has no implementation.
         """
-        match settings.ai_provider:
-            case AIProviderName.ANTHROPIC:
-                return AnthropicProvider(settings)
-            case _:  # pragma: no cover - unreachable while one provider exists
-                raise ConfigurationError(
-                    f"No implementation for AI provider '{settings.ai_provider}'"
-                )
+        # Re-derived from the *pre-vault* settings, not from `self.settings`.
+        # Overlaying onto already-overlaid settings would make a deleted key
+        # immortal: the value would survive in the merged copy with nothing left
+        # in the vault to remove it.
+        vault = CredentialVault(self.base_settings.credentials_path)
+        refreshed = self._apply_vault(self.base_settings, vault)
+
+        chain = self._build_ai_provider(refreshed)
+        if isinstance(self.ai_provider, FallbackProvider) and isinstance(chain, FallbackProvider):
+            await self.ai_provider.replace(chain.providers)
+        else:  # pragma: no cover - both sides are built by _build_ai_provider
+            self.ai_provider = chain
+
+        self.logger.info("ai_providers_reloaded", chain=self.ai_provider.name)
+
+    @staticmethod
+    def _build_ai_provider(settings: Settings) -> AIProvider:
+        """Build the provider chain, in the configured preference order.
+
+        Every provider is constructed whether or not it holds credentials — an
+        unconfigured one reports itself unavailable and is skipped at call time,
+        so adding a key later starts working without touching this code.
+
+        Args:
+            settings: Configuration naming the provider order and credentials.
+
+        Returns:
+            A ``FallbackProvider`` over the configured chain.
+
+        Raises:
+            ConfigurationError: A provider name has no implementation.
+        """
+        chain: list[AIProvider] = []
+
+        for choice in settings.ai_providers:
+            match choice:
+                case AIProviderName.ANTHROPIC:
+                    chain.append(AnthropicProvider(settings))
+                case AIProviderName.GEMINI:
+                    chain.append(GeminiProvider(settings))
+                case AIProviderName.GROQ:
+                    key = _secret(settings.groq_api_key)
+                    chain.append(
+                        OpenAICompatibleProvider(
+                            name="groq",
+                            # Groq is a hosted service, so no key means nowhere to
+                            # call. Withholding the URL is what makes the provider
+                            # report itself unavailable instead of 401-ing on every
+                            # request and dragging the chain down with it.
+                            base_url=settings.groq_base_url if key else "",
+                            model=settings.groq_model,
+                            api_key=key,
+                            max_tokens=settings.ai_max_tokens,
+                        )
+                    )
+                case AIProviderName.LOCAL:
+                    chain.append(
+                        OpenAICompatibleProvider(
+                            name="local",
+                            # A local server needs a URL and legitimately needs no
+                            # key, so availability follows the URL here.
+                            base_url=settings.local_base_url,
+                            model=settings.local_model,
+                            api_key=_secret(settings.local_api_key),
+                            max_tokens=settings.ai_max_tokens,
+                        )
+                    )
+                case _:  # pragma: no cover - the enum is exhaustive above
+                    raise ConfigurationError(f"No implementation for AI provider '{choice}'")
+
+        return FallbackProvider(chain)
 
     async def aclose(self) -> None:
         """Release resources held by contained objects.

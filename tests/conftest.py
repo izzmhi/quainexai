@@ -46,6 +46,12 @@ def settings(tmp_path: Path) -> Settings:
         # Each test gets its own database file, so no test can see another's
         # memories and none of them touch the real store in the repo root.
         database_path=tmp_path / "test.db",
+        # Critical isolation, not tidiness: the container overlays credentials
+        # from the vault on top of settings. Left at its default this would read
+        # the developer's real `~/.quainex/credentials.dat`, so a suite that is
+        # supposed to run offline would quietly start making billed API calls —
+        # and any test that writes a credential would overwrite a real key.
+        credentials_path=tmp_path / "credentials.dat",
     )
 
 

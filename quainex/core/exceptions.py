@@ -188,11 +188,15 @@ class ProviderNotConfiguredError(ProviderError):
     error_code = "provider_not_configured"
     http_status = HTTPStatus.SERVICE_UNAVAILABLE
 
-    def __init__(self, provider: str) -> None:
+    def __init__(self, provider: str, remedy: str | None = None) -> None:
         """Initialise the error.
 
         Args:
             provider: Name of the provider that lacks credentials.
+            remedy: What to do about it. Supplied by callers that know something
+                more useful than the provider's name — the fallback chain, for
+                instance, can name every variable that would fix this.
         """
-        super().__init__(f"AI provider '{provider}' is not configured")
+        message = f"AI provider '{provider}' is not configured"
+        super().__init__(f"{message}. {remedy}" if remedy else message)
         self.provider = provider

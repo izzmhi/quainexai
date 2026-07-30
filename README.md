@@ -7,11 +7,52 @@ understands natural language, automates workflows, controls the machine it runs
 on, and eventually manages a digital life — while staying privacy-conscious and
 under the user's control.
 
-> **Status: Phases 1–8 of 10 complete.**
+> **Status: Phases 1–10 of 10 complete.**
 > Quainex understands a spoken or typed request, classifies it into a typed
 > intent, executes it on this machine behind two independent safety gates,
-> answers out loud, and remembers the exchange. Remote control from a phone is
-> Phase 6.
+> answers out loud, and remembers the exchange. It has a browser interface, takes
+> orders from a phone over Telegram, runs goals autonomously within a budget, and
+> loads capability-gated plugins.
+
+## The interface
+
+```powershell
+python main.py
+```
+
+Then open <http://127.0.0.1:8000/ui/>. Four panels:
+
+| Panel | What it is for |
+|---|---|
+| **Console** | Type or hold the mic. A reactive core shows what Quainex is doing, and anything dangerous opens a confirmation gate. |
+| **History** | Every turn, plus the append-only activity trail. |
+| **Commands** | The executor's own registry — if it is not listed, no phrasing will run it. |
+| **Settings** | Paste API keys, see which provider is answering, and prove a key works. |
+
+**You never have to edit a config file to get started.** Paste a free Groq or
+Gemini key into Settings and it takes effect on the next request — no restart. The
+key is encrypted with Windows DPAPI before it touches the disk, and nothing in
+Quainex will ever read it back to you.
+
+No build step, no `npm install`, no CDN. See [`dashboard/README.md`](dashboard/README.md).
+
+## AI providers: free first
+
+Quainex tries providers in order and the first one holding a key answers:
+
+| Order | Provider | Cost | Notes |
+|---|---|---|---|
+| 1 | **Groq** | free | Fastest. Structured output is prompt-guided, not enforced. |
+| 2 | **Gemini** | free | Native schema enforcement, and vision (screen + PDF questions). |
+| 3 | **Anthropic** | paid | Strongest reasoning. The backstop, not the entry fee. |
+| 4 | **Local** | free | Any OpenAI-compatible server — Ollama, LM Studio. Fully offline. |
+
+Only *provider* failures fall through — a bad key, a rate limit, a missing
+capability. **A refusal does not.** If a model declines a request, asking a
+different model the same thing is shopping for a yes, not error recovery.
+
+Reorder with `QUAINEX_AI_PROVIDERS`. An entry with no key is skipped, so an
+unused slot costs nothing.
 
 ## Optional: voice
 
@@ -81,7 +122,7 @@ no matter what it is told**.
 |---|---|---|
 | Python | 3.12+ | `winget install Python.Python.3.12` |
 | Git | any recent | |
-| Anthropic API key | optional | Only needed for AI features; Quainex boots without one |
+| An AI key | optional | A **free** [Groq](https://console.groq.com/keys) or [Gemini](https://aistudio.google.com/apikey) key is enough. Quainex boots without any. |
 
 ---
 
@@ -120,6 +161,7 @@ python main.py
 
 Then:
 
+- **Interface: <http://127.0.0.1:8000/ui/>** — a bare `/` redirects here
 - Health: <http://127.0.0.1:8000/health>
 - API docs: <http://127.0.0.1:8000/docs> (development only)
 

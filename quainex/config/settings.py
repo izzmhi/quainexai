@@ -30,7 +30,7 @@ from enum import StrEnum
 from functools import lru_cache
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 from pydantic import Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -57,9 +57,16 @@ class LogLevel(StrEnum):
 
 
 class AIProviderName(StrEnum):
-    """Identifier for the backing AI provider implementation."""
+    """Identifier for a backing AI provider implementation."""
 
+    #: Free tier, very fast. Structured output is prompt-guided, not enforced.
+    GROQ = "groq"
+    #: Free tier, native schema enforcement, and vision.
+    GEMINI = "gemini"
+    #: Paid, strongest structured output and vision.
     ANTHROPIC = "anthropic"
+    #: Any OpenAI-compatible server, including a local Ollama.
+    LOCAL = "local"
 
 
 class AIEffort(StrEnum):
@@ -108,8 +115,50 @@ class Settings(BaseSettings):
     log_level: LogLevel = LogLevel.INFO
     log_dir: Path = Path("logs")
 
+    # --- Dashboard -------------------------------------------------------
+    # Where the browser interface is served from. Relative paths resolve to the
+    # repo root. Set to a non-existent path to run headless: the mount is skipped
+    # rather than failing startup, so an API-only deployment needs no code change.
+    dashboard_dir: Path = Path("dashboard")
+    serve_dashboard: bool = True
+
     # --- AI provider -----------------------------------------------------
-    ai_provider: AIProviderName = AIProviderName.ANTHROPIC
+    # Providers are tried in this order, and the first one *configured* wins.
+    # Free tiers lead deliberately: Quainex should be fully usable before anyone
+    # has paid for anything, with the paid provider as the backstop rather than
+    # the entry fee. Reorder freely — an entry with no key is skipped.
+    ai_providers: list[AIProviderName] = Field(
+        default_factory=lambda: [
+            AIProviderName.GROQ,
+            AIProviderName.GEMINI,
+            AIProviderName.ANTHROPIC,
+            AIProviderName.LOCAL,
+        ]
+    )
+
+    # --- Groq (free tier) -------------------------------------------------
+    groq_api_key: SecretStr | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+
+    # --- Google Gemini (free tier) ---------------------------------------
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-2.0-flash"
+
+    # --- Local / self-hosted (Ollama, LM Studio, OpenRouter) -------------
+    # Offline mode: no key needed, nothing leaves the machine.
+    local_base_url: str = ""
+    local_model: str = "llama3.1"
+    local_api_key: SecretStr | None = None
+
+    # Where keys saved from the dashboard are stored, encrypted. Kept under the
+    # user's profile rather than the repo so it can never be committed, and so
+    # Windows DPAPI's per-user scope lines up with the file's location.
+    credentials_path: Path = Field(
+        default_factory=lambda: Path.home() / ".quainex" / "credentials.dat"
+    )
+
+    # --- Anthropic (paid) -------------------------------------------------
     anthropic_api_key: SecretStr | None = None
     ai_model: str = "claude-opus-5"
     ai_effort: AIEffort = AIEffort.MEDIUM
@@ -237,6 +286,49 @@ class Settings(BaseSettings):
     tts_rate: int = Field(default=0, ge=-10, le=10)
     tts_voice: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _explain_renamed_settings(cls, values: Any) -> Any:
+        """Turn a stale variable name into an instruction instead of a puzzle.
+
+        ``extra="forbid"`` is what makes a typo in ``.env`` fail loudly rather
+        than silently reverting to a default, and that is worth keeping. Its cost
+        is that a *renamed* setting produces "Extra inputs are not permitted",
+        which tells the reader nothing about what to write instead.
+
+        Handled here rather than by keeping a deprecated alias: an alias means the
+        old name goes on working, and two spellings for one concept is how
+        configuration files rot.
+
+        Args:
+            values: Raw input, before field validation.
+
+        Returns:
+            The input unchanged.
+
+        Raises:
+            ValueError: A renamed setting is still present.
+        """
+        if not isinstance(values, dict):  # pragma: no cover - always a mapping here
+            return values
+
+        renamed = {
+            # Singular -> plural: Quainex tries a chain of providers now rather
+            # than exactly one.
+            "ai_provider": (
+                "QUAINEX_AI_PROVIDERS",
+                'a JSON list, e.g. ["groq", "gemini", "anthropic", "local"]',
+            ),
+        }
+        for old, (new, shape) in renamed.items():
+            if old in values:
+                raise ValueError(
+                    f"QUAINEX_{old.upper()} has been renamed to {new}, which takes "
+                    f"{shape}. Providers are now tried in order and the first one "
+                    f"holding a key answers. Remove the old line from your .env."
+                )
+        return values
+
     @model_validator(mode="after")
     def _enforce_production_invariants(self) -> Self:
         """Force debug off in production.
@@ -261,6 +353,8 @@ class Settings(BaseSettings):
             object.__setattr__(self, "database_path", REPO_ROOT / self.database_path)
         if not self.plugin_dir.is_absolute():
             object.__setattr__(self, "plugin_dir", REPO_ROOT / self.plugin_dir)
+        if not self.dashboard_dir.is_absolute():
+            object.__setattr__(self, "dashboard_dir", REPO_ROOT / self.dashboard_dir)
         return self
 
     @property
@@ -374,13 +468,15 @@ class Settings(BaseSettings):
     @computed_field  # type: ignore[prop-decorator]
     @property
     def has_ai_credentials(self) -> bool:
-        """Whether an API key is configured for the selected AI provider.
+        """Whether any AI provider is configured.
 
         Quainex boots without one; AI-backed features degrade rather than crash.
+        A local endpoint counts, since it needs a URL rather than a key.
         """
-        return self.anthropic_api_key is not None and bool(
-            self.anthropic_api_key.get_secret_value().strip()
-        )
+        keys = (self.groq_api_key, self.gemini_api_key, self.anthropic_api_key)
+        if any(key is not None and key.get_secret_value().strip() for key in keys):
+            return True
+        return bool(self.local_base_url.strip())
 
 
 @lru_cache(maxsize=1)
