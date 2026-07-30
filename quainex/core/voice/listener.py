@@ -65,7 +65,7 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from quainex.core.exceptions import QuainexError, SpeechUnavailableError
+from quainex.core.exceptions import NoSpeechError, QuainexError, SpeechUnavailableError
 from quainex.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -186,6 +186,17 @@ class WakeWordListener:
                 try:
                     await self._cycle()
                     failures = 0
+                except NoSpeechError:
+                    # A quiet room, which is most of the time. Emphatically not a
+                    # failure: counted as one, silence drove the listener to its
+                    # give-up threshold and shut it down after about ninety seconds
+                    # of nothing happening — broken in precisely the situation it
+                    # exists for.
+                    #
+                    # Not logged either. A line every few seconds forever would bury
+                    # everything worth reading.
+                    failures = 0
+                    self._last_cycle_at = time.monotonic()
                 except SpeechUnavailableError as exc:
                     # Not transient: the microphone or the model is gone.
                     _log.error("wake_word_listener_unavailable", reason=exc.message)

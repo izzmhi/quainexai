@@ -16,7 +16,7 @@ from quainex.config.settings import Settings
 from quainex.core.brain import Intent, IntentType
 from quainex.core.commands import CommandStatus
 from quainex.core.commands.base import CommandResult
-from quainex.core.exceptions import ProviderError, SpeechUnavailableError
+from quainex.core.exceptions import NoSpeechError, ProviderError, SpeechUnavailableError
 from quainex.core.voice import Transcript, VoiceTurn, WakeWordListener
 
 
@@ -215,6 +215,43 @@ async def test_speech_becoming_unavailable_stops_the_loop(tmp_path):
 
     assert listener.is_running is False
     assert session.cycles == 1
+
+
+async def test_silence_is_not_a_failure(tmp_path):
+    """The bug that made hands-free mode useless.
+
+    The recorder raises when a recording holds no speech, and the listener counted
+    that toward its give-up threshold — so a quiet room drove it to shut down after
+    about ninety seconds. Broken in exactly the situation it exists for, and only
+    visible by leaving it running.
+
+    Far more silent cycles than the threshold here, and it must still be listening
+    at the end.
+    """
+    from quainex.core.voice.listener import _MAX_CONSECUTIVE_FAILURES
+
+    quiet = [NoSpeechError("No speech was detected.")] * (_MAX_CONSECUTIVE_FAILURES * 3)
+    session = FakeSession([*quiet, _turn("Quainex take a screenshot", detected=True)])
+    listener = _listener(session, tmp_path)
+
+    await asyncio.wait_for(listener.run(), timeout=10)
+
+    # It survived the silence and acted on the request that followed it.
+    assert listener.status()["requests_acted_on"] == 1
+
+
+async def test_silence_still_counts_as_a_completed_cycle(tmp_path):
+    """Otherwise a quiet room looks like a stalled loop.
+
+    ``last_cycle_seconds_ago`` is what distinguishes "listening, nothing said" from
+    "hung", so silence has to update it.
+    """
+    session = FakeSession([NoSpeechError("No speech was detected.")])
+    listener = _listener(session, tmp_path)
+
+    await asyncio.wait_for(listener.run(), timeout=5)
+
+    assert isinstance(listener.status()["last_cycle_seconds_ago"], float)
 
 
 async def test_repeated_failures_give_up_rather_than_spin(tmp_path):

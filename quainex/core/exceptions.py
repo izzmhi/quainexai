@@ -172,6 +172,28 @@ class SpeechError(QuainexError):
     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+class NoSpeechError(SpeechError):
+    """The recording contained no speech.
+
+    Separate from ``SpeechError`` because it is not a failure — it is the normal
+    outcome of a quiet room, and the always-on listener spends most of its life
+    here. Folded in with real errors it counted toward the give-up threshold, so
+    the listener reliably shut itself down after about ninety seconds of silence:
+    broken in exactly the situation it exists for.
+
+    A caller that asked for one recording and got nothing still wants to know, so
+    it remains an exception rather than an empty result. What changed is that the
+    distinction is in the *type* instead of the message — the listener's decision
+    to ignore this must not rest on matching prose.
+
+    400 rather than 500: nothing malfunctioned, and a client that uploaded silence
+    should not be told the server broke.
+    """
+
+    error_code = "no_speech"
+    http_status = HTTPStatus.BAD_REQUEST
+
+
 class SpeechUnavailableError(SpeechError):
     """The speech subsystem is not installed or not ready.
 

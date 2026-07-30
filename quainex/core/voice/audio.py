@@ -34,7 +34,7 @@ from __future__ import annotations
 import wave
 from typing import TYPE_CHECKING, Protocol
 
-from quainex.core.exceptions import SpeechError, SpeechUnavailableError
+from quainex.core.exceptions import NoSpeechError, SpeechError, SpeechUnavailableError
 from quainex.core.logging import get_logger
 
 if TYPE_CHECKING:
@@ -179,7 +179,10 @@ class MicrophoneRecorder:
             raise SpeechError(f"Could not record from the microphone: {exc}") from exc
 
         if not heard_speech:
-            raise SpeechError("No speech was detected.")
+            # A distinct type, not a message: the always-on listener has to tell
+            # "the room was quiet" apart from "the microphone broke", and it must
+            # not do that by matching prose.
+            raise NoSpeechError("No speech was detected.")
 
         return self._write_wav(destination, b"".join(collected))
 

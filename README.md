@@ -106,6 +106,30 @@ Kept optional deliberately — Whisper weights are a large first-run download, a
 Quainex runs fine by text without them. Speech *output* needs no download at all,
 so it works either way. `GET /voice/status` reports each component separately.
 
+**Hands-free.** Say **"Quainex, take a screenshot"** — wake word and request in one
+breath, with nothing pressed. Toggle it from the button under the core on the
+Console panel, or set `QUAINEX_VOICE_ALWAYS_LISTENING=true` to have it on from
+login.
+
+Unaddressed speech costs **nothing**: the transcript is produced locally by
+Whisper and discarded before the Brain is called, so a room full of conversation
+spends CPU and zero API tokens, and no audio ever leaves the machine. It is still
+an open microphone, which is why it is off by default and one click to stop.
+
+It hears you *after* you stop speaking, so "Quainex" … pause … "take a
+screenshot" will not work. One sentence will.
+
+**If it cannot hear you:**
+
+```powershell
+python scripts/check_microphone.py
+```
+
+Shows the input device and a live level meter against the speech threshold, so
+"it isn't hearing me" separates into *the mic is muted* and *the mic is fine*.
+It refuses to run while hands-free is on — Windows hands the second opener a
+silent stream rather than an error, so a working microphone would measure as dead.
+
 **To prove recognition actually works on your machine:**
 
 ```powershell
