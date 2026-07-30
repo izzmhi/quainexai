@@ -424,7 +424,7 @@ async def test_the_image_is_not_sent_unless_uploading_is_enabled(tmp_path):
     bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
     recorder = PhotoRecorder()
 
-    await bridge._maybe_send_screenshot(
+    await bridge._maybe_send_image(
         recorder,  # type: ignore[arg-type]
         7,
         _screenshot_intent(),
@@ -446,7 +446,7 @@ async def test_the_image_is_uploaded_when_enabled(tmp_path):
     )
     recorder = PhotoRecorder()
 
-    await bridge._maybe_send_screenshot(
+    await bridge._maybe_send_image(
         recorder,  # type: ignore[arg-type]
         7,
         _screenshot_intent(),
@@ -470,7 +470,7 @@ async def test_an_oversized_screenshot_says_so_rather_than_failing_silently(tmp_
     )
     recorder = PhotoRecorder()
 
-    await bridge._maybe_send_screenshot(
+    await bridge._maybe_send_image(
         recorder,  # type: ignore[arg-type]
         7,
         _screenshot_intent(),
@@ -500,7 +500,7 @@ async def test_only_screenshots_are_uploaded(tmp_path):
         requires_confirmation=False,
     )
 
-    await bridge._maybe_send_screenshot(
+    await bridge._maybe_send_image(
         recorder,  # type: ignore[arg-type]
         7,
         other,

@@ -132,6 +132,18 @@ class DesktopController(Protocol):
         """Capture the screen to ``destination``."""
         ...
 
+    def capture_webcam(self, destination: Path) -> str:
+        """Capture a webcam still to ``destination``."""
+        ...
+
+    def set_wifi(self, *, enabled: bool) -> str:
+        """Connect to or disconnect from Wi-Fi."""
+        ...
+
+    def wifi_status(self) -> str:
+        """Report the Wi-Fi connection state."""
+        ...
+
     def read_clipboard(self) -> str:
         """Return the current clipboard text."""
         ...

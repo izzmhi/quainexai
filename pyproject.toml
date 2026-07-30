@@ -35,6 +35,14 @@ voice = [
     "sounddevice>=0.5",     # microphone capture via PortAudio
     "numpy>=2.0",           # audio buffers
 ]
+# Webcam capture. pygrabber drives DirectShow through comtypes — small, pure
+# Python — rather than OpenCV, whose ~40 MB wheel this machine's flaky downloads
+# do not survive. Pillow (already a base dependency, for screenshots) encodes.
+#   pip install -e ".[camera]"
+camera = [
+    "pygrabber>=0.2",  # DirectShow webcam frames
+    "numpy>=2.0",      # frame buffers
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -110,8 +118,15 @@ disallow_untyped_defs = false
 # These ship no type stubs and have no types-* packages. Each is reached through
 # a Protocol boundary, so the untyped surface is confined to one adapter module.
 [[tool.mypy.overrides]]
-module = ["pyperclip", "faster_whisper", "sounddevice"]
+module = ["pyperclip", "faster_whisper", "sounddevice", "pygrabber", "pygrabber.*"]
 ignore_missing_imports = true
+
+# pygrabber's classes carry no annotations, so every call reads as untyped. The
+# surface is confined to webcam.py, one adapter behind the DesktopController
+# Protocol — the same containment the other untyped libraries get.
+[[tool.mypy.overrides]]
+module = "quainex.core.automation.webcam"
+disallow_untyped_calls = false
 
 # ---------------------------------------------------------------------------
 # Tests

@@ -66,9 +66,12 @@ class IntentType(StrEnum):
 
     # --- Utilities ---
     SCREENSHOT = "screenshot"
+    WEBCAM = "webcam"
     CLIPBOARD = "clipboard"
     NOTIFY = "notify"
     SYSTEM_INFO = "system_info"
+    WEB_SEARCH = "web_search"
+    WIFI = "wifi"
 
     # --- Developer assistant (Phase 7) ---
     RUN_DEV_COMMAND = "run_dev_command"
@@ -108,6 +111,17 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
         "Change screen brightness. target = 'up', 'down', or a number 0-100."
     ),
     IntentType.SCREENSHOT: "Capture the screen. No target.",
+    IntentType.WEBCAM: (
+        "Take a photo from the webcam. Use for 'take a webcam picture', 'who is "
+        "there', 'show me the camera'. No target."
+    ),
+    IntentType.WEB_SEARCH: (
+        "Search the web and open the results in the browser. target = the search "
+        "query, e.g. 'weather in Lagos' or 'python enumerate'."
+    ),
+    IntentType.WIFI: (
+        "Turn Wi-Fi on or off, or report its state. target must be 'on', 'off', or 'status'."
+    ),
     IntentType.CLIPBOARD: (
         "Read or write the clipboard. parameters may carry action=read|write and text=..."
     ),

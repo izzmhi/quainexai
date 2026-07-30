@@ -87,6 +87,32 @@ _HOSTNAME = re.compile(
 _SUBPROCESS_TIMEOUT = 15
 
 
+def _netsh_field(output: str, label: str) -> str | None:
+    """Extract a ``Label : value`` field from netsh output.
+
+    Matches on the label as a prefix before the colon, so it is unaffected by the
+    variable whitespace netsh uses to align its columns. Case-insensitive because
+    the exact casing varies across Windows versions.
+
+    Args:
+        output: The netsh command output.
+        label: The field label to find, e.g. ``"SSID"``.
+
+    Returns:
+        The field value, or ``None`` when the label is absent.
+    """
+    wanted = label.strip().lower()
+    for line in output.splitlines():
+        if ":" not in line:
+            continue
+        name, _, value = line.partition(":")
+        # Exact label match, not a substring: "SSID" must not also match
+        # "BSSID", which sits two lines below it in the same output.
+        if name.strip().lower() == wanted:
+            return value.strip() or None
+    return None
+
+
 def _system_executable(name: str) -> str:
     """Resolve a Windows system executable to an absolute path.
 
@@ -475,6 +501,79 @@ class WindowsDesktopController:
         _log.info("screenshot_captured", path=str(destination))
         return f"Saved a screenshot to {destination}."
 
+    def capture_webcam(self, destination: Path) -> str:
+        """Capture a still from the webcam.
+
+        Delegates to ``automation.webcam`` so the DirectShow and image-encoding
+        detail stays out of this controller — and so a machine without the camera
+        extra reports it cleanly rather than failing to import.
+
+        Args:
+            destination: Where to write the JPEG.
+
+        Returns:
+            A confirmation naming the file.
+
+        Raises:
+            CommandExecutionError: No camera, camera busy, or capture failed.
+        """
+        from quainex.core.automation.webcam import capture_webcam
+
+        capture_webcam(destination)
+        return f"Captured a webcam photo to {destination}."
+
+    def set_wifi(self, *, enabled: bool) -> str:
+        """Connect to or disconnect from Wi-Fi.
+
+        Uses ``netsh wlan`` rather than toggling the adapter, deliberately:
+        disabling the radio needs administrator rights, and Quainex runs as a
+        normal user. Disconnecting does not, and it achieves what "turn off Wi-Fi"
+        means to a person — off the network. Reconnecting joins the first saved
+        profile in range.
+
+        Args:
+            enabled: ``True`` to connect, ``False`` to disconnect.
+
+        Returns:
+            What happened.
+
+        Raises:
+            CommandExecutionError: The command failed, or no saved network exists
+                to reconnect to.
+        """
+        netsh = _system_executable("netsh.exe")
+        if not enabled:
+            self._run([netsh, "wlan", "disconnect"], failure="Could not disconnect from Wi-Fi.")
+            _log.info("wifi_changed", enabled=False)
+            return "Disconnected from Wi-Fi."
+
+        profile = self._first_wifi_profile()
+        if profile is None:
+            raise CommandExecutionError(
+                "No saved Wi-Fi network to reconnect to. Connect once manually, and "
+                "Windows will remember it."
+            )
+        self._run(
+            [netsh, "wlan", "connect", f"name={profile}"],
+            failure=f"Could not connect to '{profile}'.",
+        )
+        _log.info("wifi_changed", enabled=True, profile=profile)
+        return f"Connecting to Wi-Fi network '{profile}'."
+
+    def wifi_status(self) -> str:
+        """Report the Wi-Fi connection state.
+
+        Returns:
+            A one-line summary: connected (with the network name) or not.
+        """
+        output = self._netsh_output(["wlan", "show", "interfaces"])
+        state = _netsh_field(output, "State") or "unknown"
+        ssid = _netsh_field(output, "SSID")
+
+        if state.lower() == "connected" and ssid:
+            return f"Wi-Fi is connected to '{ssid}'."
+        return f"Wi-Fi is {state.lower()}."
+
     def read_clipboard(self) -> str:
         """Return the clipboard contents.
 
@@ -659,6 +758,44 @@ class WindowsDesktopController:
         user32 = ctypes.windll.user32
         user32.keybd_event(virtual_key, 0, 0, 0)
         user32.keybd_event(virtual_key, 0, _KEYEVENTF_KEYUP, 0)
+
+    def _netsh_output(self, args: list[str]) -> str:
+        """Run a read-only ``netsh`` query and return its text.
+
+        Args:
+            args: Arguments after the executable, e.g. ``["wlan", "show", ...]``.
+
+        Returns:
+            Standard output, or an empty string on failure — a status query that
+            cannot reach ``netsh`` should report "unknown", not raise.
+        """
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed argv, absolute exe, no shell
+                [_system_executable("netsh.exe"), *args],
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROCESS_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            _log.warning("netsh_query_failed", args=args, error=str(exc))
+            return ""
+        return result.stdout
+
+    def _first_wifi_profile(self) -> str | None:
+        """Return the name of the first saved Wi-Fi profile.
+
+        Returns:
+            A profile name, or ``None`` when none are saved.
+        """
+        for line in self._netsh_output(["wlan", "show", "profiles"]).splitlines():
+            # Lines read "All User Profile     : NetworkName". The colon splits the
+            # label from the value regardless of the localised label text.
+            if ":" in line and "profile" in line.lower():
+                name = line.split(":", 1)[1].strip()
+                if name:
+                    return name
+        return None
 
     def _current_brightness(self) -> int:
         """Read the current brightness percentage.

@@ -476,20 +476,25 @@ class TelegramBridge:
             return
 
         await self._send(client, chat_id, result.message)
-        await self._maybe_send_screenshot(client, chat_id, intent, result)
+        await self._maybe_send_image(client, chat_id, intent, result)
 
-    async def _maybe_send_screenshot(
+    async def _maybe_send_image(
         self,
         client: httpx.AsyncClient,
         chat_id: int,
         intent: Intent,
         result: CommandResult,
     ) -> None:
-        """Upload the image when a screenshot was taken and uploading is enabled.
+        """Upload the captured image when one was produced and uploading is enabled.
 
-        Off unless ``telegram_send_screenshots`` is set, because this puts a picture
-        of the screen into a third-party chat that is not end-to-end encrypted. With
-        it off the reply is a file path, which discloses nothing.
+        Covers screenshots and webcam photos — both put a picture of, or around, the
+        machine into a third-party chat that is not end-to-end encrypted, so both are
+        governed by the same ``telegram_send_screenshots`` switch. With it off the
+        reply is a file path, which discloses nothing.
+
+        A webcam photo answered over Telegram is worth a word on the tradeoff, since
+        it is the whole point of the feature: the image reaches Telegram's servers
+        and lives in the chat history until deleted. The owner turned it on.
 
         Args:
             client: HTTP client.
@@ -497,7 +502,7 @@ class TelegramBridge:
             intent: What was asked for.
             result: What happened, carrying the saved path.
         """
-        if intent.intent is not IntentType.SCREENSHOT or not result.ok:
+        if intent.intent not in {IntentType.SCREENSHOT, IntentType.WEBCAM} or not result.ok:
             return
         if not self._settings.telegram_send_screenshots:
             return
@@ -508,13 +513,13 @@ class TelegramBridge:
 
         image = Path(path_value)
         if not image.is_file():
-            _log.warning("telegram_screenshot_missing", path=path_value)
+            _log.warning("telegram_image_missing", path=path_value)
             return
 
         try:
             payload = image.read_bytes()
         except OSError as exc:
-            _log.warning("telegram_screenshot_unreadable", error=str(exc))
+            _log.warning("telegram_image_unreadable", error=str(exc))
             return
 
         if len(payload) > _MAX_PHOTO_BYTES:
@@ -523,26 +528,27 @@ class TelegramBridge:
             await self._send(
                 client,
                 chat_id,
-                f"The screenshot is {len(payload) // 1024 // 1024} MB, over Telegram's "
+                f"The image is {len(payload) // 1024 // 1024} MB, over Telegram's "
                 f"{_MAX_PHOTO_BYTES // 1024 // 1024} MB photo limit. It is saved at "
                 f"{image.name} on the machine.",
             )
             return
 
+        mime = "image/jpeg" if image.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
         try:
             response = await client.post(
                 f"{self._url()}/sendPhoto",
                 data={"chat_id": str(chat_id)},
-                files={"photo": (image.name, payload, "image/png")},
+                files={"photo": (image.name, payload, mime)},
                 timeout=120,
             )
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            _log.warning("telegram_screenshot_upload_failed", error=str(exc))
-            await self._send(client, chat_id, "The screenshot was saved but could not be sent.")
+            _log.warning("telegram_image_upload_failed", error=str(exc))
+            await self._send(client, chat_id, "The image was saved but could not be sent.")
             return
 
-        _log.info("telegram_screenshot_sent", bytes=len(payload))
+        _log.info("telegram_image_sent", intent=intent.intent.value, bytes=len(payload))
 
     async def _handle_button(self, client: httpx.AsyncClient, update: TelegramUpdate) -> None:
         """Handle a tapped inline button.

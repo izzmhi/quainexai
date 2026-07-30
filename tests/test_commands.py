@@ -80,6 +80,20 @@ class FakeDesktopController:
         destination.write_bytes(b"\x89PNG\r\n\x1a\n fake screenshot")
         return self._record("screenshot", destination)
 
+    def capture_webcam(self, destination: Path) -> str:
+        # Writes a file, like the real one: the Telegram bridge reads it back to
+        # upload, so a fake that only records would make that path untestable.
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"\xff\xd8\xff fake jpeg")
+        return self._record("capture_webcam", destination)
+
+    def set_wifi(self, *, enabled: bool) -> str:
+        return self._record("set_wifi", enabled)
+
+    def wifi_status(self) -> str:
+        self._record("wifi_status")
+        return "Wi-Fi is connected to 'TestNet'."
+
     def read_clipboard(self) -> str:
         self._record("read_clipboard")
         return "clipboard contents"
@@ -402,6 +416,84 @@ async def test_search_results_are_returned_as_data(tmp_path):
     assert result.status is CommandStatus.SUCCEEDED
     assert result.data is not None
     assert result.data["results"][0]["path"] == "C:/fake/report.pdf"
+
+
+async def test_webcam_captures_and_returns_a_path(tmp_path):
+    """The path is what the Telegram bridge reads back to upload the photo."""
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.WEBCAM, target=None)
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert result.data is not None
+    assert result.data["path"].endswith(".jpg")
+    assert Path(result.data["path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("target", "call"),
+    [("on", ("set_wifi", True)), ("off", ("set_wifi", False)), ("status", ("wifi_status", None))],
+)
+async def test_wifi_control_reaches_the_controller(tmp_path, target, call):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.WIFI, target)
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert call in desktop.calls
+
+
+async def test_wifi_with_a_nonsense_target_is_refused_clearly(tmp_path):
+    result = await build_executor(FakeDesktopController(), _settings(tmp_path)).execute(
+        _intent(IntentType.WIFI, "sideways")
+    )
+
+    assert result.status is CommandStatus.FAILED
+    assert "on, off, or status" in result.message
+
+
+async def test_web_search_opens_the_browser_without_a_model(tmp_path, monkeypatch):
+    """The browser open is deterministic and token-free; the summary is a bonus.
+
+    The instant-answer lookup is stubbed so the test makes no network call — what
+    matters here is that the browser was opened with the query, which is the part
+    the user asked for.
+    """
+    import quainex.core.commands.builtin as builtin
+
+    async def no_answer(_query: str) -> None:
+        return None
+
+    monkeypatch.setattr(builtin, "_instant_answer", no_answer)
+
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.WEB_SEARCH, "weather in lagos")
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    opened = next(payload for action, payload in desktop.calls if action == "open_url")
+    assert "duckduckgo.com" in opened
+    assert "weather" in opened
+    assert result.data is not None
+    assert result.data["query"] == "weather in lagos"
+
+
+async def test_web_search_includes_a_summary_when_one_exists(tmp_path, monkeypatch):
+    import quainex.core.commands.builtin as builtin
+
+    async def answer(_query: str) -> str:
+        return "Lagos is a city in Nigeria."
+
+    monkeypatch.setattr(builtin, "_instant_answer", answer)
+
+    result = await build_executor(FakeDesktopController(), _settings(tmp_path)).execute(
+        _intent(IntentType.WEB_SEARCH, "lagos")
+    )
+
+    assert "Lagos is a city in Nigeria." in result.message
 
 
 async def test_system_info_is_returned_as_data(tmp_path):

@@ -25,15 +25,70 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from urllib.parse import quote_plus
+
+import httpx
 
 from quainex.core.brain import IntentType
 from quainex.core.commands.base import Command, CommandContext, CommandOutcome
-from quainex.core.exceptions import CommandNotAllowedError
+from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
+from quainex.core.logging import get_logger
 
 if TYPE_CHECKING:
     from quainex.config.settings import Settings
     from quainex.core.automation.desktop import LevelChange
     from quainex.core.brain import Intent
+
+_log = get_logger(__name__)
+
+#: DuckDuckGo's Instant Answer API. Free, keyless, and token-free — it returns a
+#: short factual summary for definitions, calculations, and well-known topics, and
+#: nothing for the rest. Perfect for "give me feedback" without a model call.
+_DDG_INSTANT_ANSWER = "https://api.duckduckgo.com/"
+
+#: Cap the summary so a phone reply stays readable and a chatty answer cannot flood
+#: the chat.
+_MAX_ANSWER_CHARS = 600
+
+
+async def _instant_answer(query: str) -> str | None:
+    """Fetch a one-line answer for a search, when one exists.
+
+    Uses DuckDuckGo's Instant Answer API — free and keyless, so this costs no API
+    tokens. It answers facts and definitions and stays silent on everything else,
+    which is the right behaviour: a wrong summary is worse than none, and the
+    browser is already open for anything it cannot answer.
+
+    Never raises: a failed lookup means the browser search still happened, and the
+    reply simply omits the summary.
+
+    Args:
+        query: What was searched for.
+
+    Returns:
+        A short answer, or ``None`` when there is no instant answer or the lookup
+        failed.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(
+                _DDG_INSTANT_ANSWER,
+                params={"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"},
+            )
+            response.raise_for_status()
+            data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _log.info("instant_answer_unavailable", error=str(exc))
+        return None
+
+    # The API spreads its answer across several fields depending on the query kind.
+    # Preferred order: a direct answer, then an encyclopaedic abstract.
+    for field in ("Answer", "AbstractText", "Definition"):
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            return text if len(text) <= _MAX_ANSWER_CHARS else text[:_MAX_ANSWER_CHARS] + "…"
+    return None
 
 
 def _target(intent: Intent) -> str:
@@ -126,6 +181,38 @@ def build_commands(settings: Settings) -> list[Command]:
         return CommandOutcome(
             message=ctx.desktop.screenshot(destination), data={"path": str(destination)}
         )
+
+    async def webcam(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        destination = settings.screenshot_dir / f"quainex-webcam-{stamp}.jpg"
+        return CommandOutcome(
+            message=ctx.desktop.capture_webcam(destination), data={"path": str(destination)}
+        )
+
+    async def wifi(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        target = _target(intent).lower()
+        if target in {"status", ""}:
+            return CommandOutcome(message=ctx.desktop.wifi_status())
+        if target in {"on", "connect", "enable"}:
+            return CommandOutcome(message=ctx.desktop.set_wifi(enabled=True))
+        if target in {"off", "disconnect", "disable"}:
+            return CommandOutcome(message=ctx.desktop.set_wifi(enabled=False))
+        raise CommandExecutionError(f"Say Wi-Fi on, off, or status — not '{target}'.")
+
+    async def web_search(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        query = _target(intent)
+        # Open the results in the browser — the deterministic, token-free half —
+        # then try for a one-line answer to speak or send back. The browser open is
+        # what the user asked for; the summary is a bonus when the query has a
+        # factual answer.
+        url = f"https://duckduckgo.com/?q={quote_plus(query)}"
+        ctx.desktop.open_url(url)
+
+        answer = await _instant_answer(query)
+        message = f"Searching the web for '{query}'."
+        if answer:
+            message += f"\n\n{answer}"
+        return CommandOutcome(message=message, data={"query": query, "url": url})
 
     async def clipboard(ctx: CommandContext, intent: Intent) -> CommandOutcome:
         parameters = intent.parameters_as_dict()
@@ -295,6 +382,23 @@ def build_commands(settings: Settings) -> list[Command]:
             intent=IntentType.SCREENSHOT,
             summary="Capture the screen to a PNG file.",
             handler=screenshot,
+        ),
+        Command(
+            intent=IntentType.WEBCAM,
+            summary="Take a photo from the webcam.",
+            handler=webcam,
+        ),
+        Command(
+            intent=IntentType.WIFI,
+            summary="Turn Wi-Fi on or off, or report its state.",
+            handler=wifi,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.WEB_SEARCH,
+            summary="Search the web and open the results, with a summary when there is one.",
+            handler=web_search,
+            requires_target=True,
         ),
         Command(
             intent=IntentType.CLIPBOARD,

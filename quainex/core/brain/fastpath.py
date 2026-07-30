@@ -63,9 +63,13 @@ from quainex.core.brain.schemas import IntentClassification, IntentParameter, In
 
 #: Longest utterance the fast path will consider.
 #:
-#: A formulaic command is short. Past this length the request is being explained
-#: rather than issued, and explanation is exactly what a model is for.
-_MAX_WORDS = 6
+#: A formulaic command is short — but a *search query* legitimately is not:
+#: "search the web for the best pizza near me" is eleven words and entirely
+#: unambiguous. So the cap is generous, and the guard against a rambling sentence
+#: being force-matched lives where it belongs instead: ``_target_is_simple``
+#: refuses a greedy "open X" whose target runs long or contains a preposition, and
+#: the anchored search/dev/wifi patterns only match their own explicit prefixes.
+_MAX_WORDS = 12
 
 #: Words that signal a captured target is not a plain name.
 #:
@@ -118,6 +122,24 @@ _EXACT_PATTERNS: tuple[tuple[re.Pattern[str], IntentType], ...] = (
         IntentType.LIST_WINDOWS,
     ),
     (re.compile(r"^what(?:'s| is) open$"), IntentType.LIST_WINDOWS),
+    # Webcam. Kept distinct from screenshot: "photo/picture" means the camera,
+    # "screenshot" means the screen. "who is there" is the anti-theft phrasing.
+    (
+        re.compile(
+            r"^(?:take |grab |capture |snap )?(?:a |the )?"
+            r"(?:webcam|web cam|camera|selfie)(?: (?:photo|picture|pic|shot|image|snap))?$"
+        ),
+        IntentType.WEBCAM,
+    ),
+    (
+        re.compile(
+            r"^(?:take|grab|snap) (?:a |the )?(?:photo|picture|pic|selfie)"
+            r"(?: (?:with|from|on|using) (?:the |my )?(?:webcam|web cam|camera))?$"
+        ),
+        IntentType.WEBCAM,
+    ),
+    (re.compile(r"^who(?:'s| is)(?: (?:there|in front of (?:me|the camera)))$"), IntentType.WEBCAM),
+    (re.compile(r"^show me (?:the )?(?:webcam|camera)$"), IntentType.WEBCAM),
 )
 
 #: Read-only development commands, mapped to the executor's exact keys.
@@ -141,6 +163,26 @@ _DEV_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"^(?:check |run )?format(?: check)?$"), "format.check"),
     (re.compile(r"^docker ps$"), "docker.ps"),
     (re.compile(r"^docker images$"), "docker.images"),
+)
+
+#: Wi-Fi, with the direction or "status" as the target.
+_WIFI_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(?:turn |switch )?wi[\s-]?fi (?P<t>on|off)$"), ""),
+    (re.compile(r"^(?:turn |switch )(?P<t>on|off) (?:the )?wi[\s-]?fi$"), ""),
+    (re.compile(r"^(?:what(?:'s| is) (?:my )?)?wi[\s-]?fi(?: status)?$"), "status"),
+    (re.compile(r"^is wi[\s-]?fi (?:on|connected)$"), "status"),
+)
+
+#: Web search. The target is the query. Distinguished from file search by an
+#: explicit web marker — "google", "search the web", "look up … online" — so plain
+#: "search for X" still means files.
+_WEB_SEARCH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:google|bing) (?P<target>.+)$"),
+    re.compile(
+        r"^(?:web search|search the (?:web|internet)|search online) (?:for )?(?P<target>.+)$"
+    ),
+    re.compile(r"^search google (?:for )?(?P<target>.+)$"),
+    re.compile(r"^look up (?P<target>.+?) (?:online|on the web|on google)$"),
 )
 
 #: Folders people name rather than describe. Matched before applications, because
@@ -263,6 +305,17 @@ def classify_locally(utterance: str) -> IntentClassification | None:
     for pattern, operation in _DEV_PATTERNS:
         if pattern.match(text):
             return _classification(IntentType.RUN_DEV_COMMAND, operation)
+
+    for pattern, fixed in _WIFI_PATTERNS:
+        if match := pattern.match(text):
+            # A pattern with a fixed target ("status") uses it; the on/off ones
+            # capture the direction from the group.
+            return _classification(IntentType.WIFI, fixed or match.group("t"))
+
+    # Before file search, so "google X" is a web search rather than a file query.
+    for pattern in _WEB_SEARCH_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.WEB_SEARCH, match.group("target").strip())
 
     # Before the application patterns, which would otherwise claim
     # "open github.com" as an application named "github.com".

@@ -266,6 +266,83 @@ def test_screen_questions_are_classified_locally(said: str):
     assert result.target
 
 
+# -- webcam, wifi, web search ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "take a webcam picture",
+        "webcam",
+        "take a selfie",
+        "who is there",
+        "show me the camera",
+        "snap a photo with the webcam",
+    ],
+)
+def test_webcam_requests_are_local(said: str):
+    """A camera photo needs no model to classify, and is distinct from a screenshot."""
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.WEBCAM
+
+
+def test_a_screenshot_is_not_mistaken_for_a_webcam_photo():
+    """A photo means the camera; a screenshot means the screen."""
+    assert classify_locally("take a screenshot").intent is IntentType.SCREENSHOT
+    assert classify_locally("take a webcam photo").intent is IntentType.WEBCAM
+
+
+@pytest.mark.parametrize(
+    ("said", "target"),
+    [
+        ("turn on wifi", "on"),
+        ("turn off wifi", "off"),
+        ("wifi on", "on"),
+        ("wi-fi off", "off"),
+        ("wifi status", "status"),
+        ("is wifi on", "status"),
+        ("what's my wifi", "status"),
+    ],
+)
+def test_wifi_control_is_local(said: str, target: str):
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.WIFI
+    assert result.target == target
+
+
+@pytest.mark.parametrize(
+    ("said", "target"),
+    [
+        ("google python enumerate", "python enumerate"),
+        ("search the web for weather in lagos", "weather in lagos"),
+        ("look up bitcoin price online", "bitcoin price"),
+        ("search the web for the best pizza places near me", "the best pizza places near me"),
+    ],
+)
+def test_web_search_is_local(said: str, target: str):
+    """The browser open costs no tokens.
+
+    Only a factual summary might, and that uses a keyless free API, not the model.
+    """
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.WEB_SEARCH
+    assert result.target == target
+
+
+def test_a_plain_search_is_still_a_file_search():
+    """Only an explicit web marker routes to the web; "search for X" means files."""
+    result = classify_locally("search for budget")
+
+    assert result is not None
+    assert result.intent is IntentType.SEARCH_FILES
+
+
 # -- what it must refuse ---------------------------------------------------
 
 
