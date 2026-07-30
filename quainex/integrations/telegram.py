@@ -62,6 +62,7 @@ from pydantic import BaseModel
 
 from quainex.core.brain import IntentType
 from quainex.core.commands import CommandStatus
+from quainex.core.commands.base import CommandResult
 from quainex.core.exceptions import ProviderError, QuainexError
 from quainex.core.logging import get_logger
 
@@ -108,6 +109,9 @@ _MAX_SEEN_SENDERS = 20
 
 #: Telegram's response when a second instance polls the same bot.
 _HTTP_CONFLICT = 409
+
+#: Telegram rejects photo uploads above 10 MB.
+_MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
 
 class TelegramUpdate(BaseModel):
@@ -472,6 +476,73 @@ class TelegramBridge:
             return
 
         await self._send(client, chat_id, result.message)
+        await self._maybe_send_screenshot(client, chat_id, intent, result)
+
+    async def _maybe_send_screenshot(
+        self,
+        client: httpx.AsyncClient,
+        chat_id: int,
+        intent: Intent,
+        result: CommandResult,
+    ) -> None:
+        """Upload the image when a screenshot was taken and uploading is enabled.
+
+        Off unless ``telegram_send_screenshots`` is set, because this puts a picture
+        of the screen into a third-party chat that is not end-to-end encrypted. With
+        it off the reply is a file path, which discloses nothing.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to send it.
+            intent: What was asked for.
+            result: What happened, carrying the saved path.
+        """
+        if intent.intent is not IntentType.SCREENSHOT or not result.ok:
+            return
+        if not self._settings.telegram_send_screenshots:
+            return
+
+        path_value = (result.data or {}).get("path")
+        if not isinstance(path_value, str):
+            return
+
+        image = Path(path_value)
+        if not image.is_file():
+            _log.warning("telegram_screenshot_missing", path=path_value)
+            return
+
+        try:
+            payload = image.read_bytes()
+        except OSError as exc:
+            _log.warning("telegram_screenshot_unreadable", error=str(exc))
+            return
+
+        if len(payload) > _MAX_PHOTO_BYTES:
+            # Telegram rejects oversized photos outright, and a silent rejection
+            # would look like the feature simply not working.
+            await self._send(
+                client,
+                chat_id,
+                f"The screenshot is {len(payload) // 1024 // 1024} MB, over Telegram's "
+                f"{_MAX_PHOTO_BYTES // 1024 // 1024} MB photo limit. It is saved at "
+                f"{image.name} on the machine.",
+            )
+            return
+
+        try:
+            response = await client.post(
+                f"{self._url()}/sendPhoto",
+                data={"chat_id": str(chat_id)},
+                files={"photo": (image.name, payload, "image/png")},
+                timeout=120,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            _log.warning("telegram_screenshot_upload_failed", error=str(exc))
+            await self._send(client, chat_id, "The screenshot was saved but could not be sent.")
+            return
+
+        _log.info("telegram_screenshot_sent", bytes=len(payload))
 
     async def _handle_button(self, client: httpx.AsyncClient, update: TelegramUpdate) -> None:
         """Handle a tapped inline button.

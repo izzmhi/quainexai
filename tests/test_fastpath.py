@@ -134,6 +134,138 @@ def test_a_local_match_says_so_in_its_reasoning():
     assert "no model call" in result.reasoning
 
 
+# -- developer commands ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "operation"),
+    [
+        ("git status", "git.status"),
+        ("git st", "git.status"),
+        ("git log", "git.log"),
+        ("git diff", "git.diff"),
+        ("run the tests", "tests.run"),
+        ("tests", "tests.run"),
+        ("pytest", "tests.run"),
+        ("run the linter", "lint.run"),
+        ("lint", "lint.run"),
+        ("check types", "types.check"),
+        ("mypy", "types.check"),
+        ("format check", "format.check"),
+        ("docker ps", "docker.ps"),
+    ],
+)
+def test_read_only_dev_commands_need_no_model(said: str, operation: str):
+    """The executor takes exact keys, so these map straight through."""
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.RUN_DEV_COMMAND
+    assert result.target == operation
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["git commit", "git push", "git pull", "git add", "commit my changes"],
+)
+def test_dev_commands_that_change_something_reach_the_model(said: str):
+    """Only the ones that *report* are local.
+
+    ``push`` and ``pull`` touch a remote, ``add`` and ``commit`` change a
+    repository, and a pattern cannot judge whether now is the moment. ``commit``
+    could not be local anyway — it needs a message extracted from the sentence,
+    which is exactly the work a model is for.
+    """
+    assert classify_locally(said) is None
+
+
+def test_run_no_longer_swallows_a_dev_command_as_an_application():
+    """The misclassification that measuring exposed.
+
+    "run" was one of the generic application verbs, so "run the tests" came back as
+    ``open_application`` targeting "the tests" — a confidently wrong answer where
+    falling through would have been right. The allowlist would have refused it, but
+    the classification was still nonsense.
+    """
+    result = classify_locally("run the tests")
+
+    assert result is not None
+    assert result.intent is IntentType.RUN_DEV_COMMAND
+
+
+# -- folders, search and the screen ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "target"),
+    [
+        ("open documents", "documents"),
+        ("open my downloads folder", "downloads"),
+        ("open the desktop folder", "desktop"),
+        ("go to pictures", "pictures"),
+    ],
+)
+def test_named_folders_are_not_mistaken_for_applications(said: str, target: str):
+    """A folder name and a program name are indistinguishable to a pattern.
+
+    Only the name distinguishes them, so the folder rule is limited to names that
+    are unambiguously directories.
+    """
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.OPEN_FOLDER
+    assert result.target == target
+
+
+@pytest.mark.parametrize("said", ["open notepad", "open chrome", "launch spotify"])
+def test_applications_are_still_applications(said: str):
+    """The folder rule must not claim these."""
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.OPEN_APPLICATION
+
+
+@pytest.mark.parametrize(
+    ("said", "target"),
+    [
+        ("find my invoice pdf", "invoice pdf"),
+        ("search for budget", "budget"),
+        ("look for the meeting notes", "meeting notes"),
+    ],
+)
+def test_file_search_needs_no_model(said: str, target: str):
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.SEARCH_FILES
+    assert result.target == target
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "what's on my screen",
+        "what is on the screen",
+        "read the error on screen",
+        "what am i looking at",
+    ],
+)
+def test_screen_questions_are_classified_locally(said: str):
+    """Answering still needs a vision model; *classifying* does not.
+
+    So the classification tokens are saved on every one of these, which is most of
+    the cost of a short question.
+    """
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.LOOK_AT_SCREEN
+    # The whole question is the target: the analyst needs the words, not a label.
+    assert result.target
+
+
 # -- what it must refuse ---------------------------------------------------
 
 

@@ -120,9 +120,63 @@ _EXACT_PATTERNS: tuple[tuple[re.Pattern[str], IntentType], ...] = (
     (re.compile(r"^what(?:'s| is) open$"), IntentType.LIST_WINDOWS),
 )
 
+#: Read-only development commands, mapped to the executor's exact keys.
+#:
+#: Only the ones that *report*. ``git.add``, ``git.commit``, ``git.push`` and
+#: ``git.pull`` are deliberately absent: they change a repository or a remote, and
+#: the same rule that keeps ``shutdown`` off the fast path applies — a pattern
+#: cannot judge whether now is the moment to push. They still work, via the model.
+#:
+#: ``git.commit`` could not be here anyway; it needs a message extracted from the
+#: sentence, which is exactly the work a model is for.
+_DEV_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^git (?:status|st)$"), "git.status"),
+    (re.compile(r"^git log$"), "git.log"),
+    (re.compile(r"^git diff(?: staged)?$"), "git.diff"),
+    (re.compile(r"^git branch(?:es)?$"), "git.branch"),
+    (re.compile(r"^(?:run |run the )?(?:tests|test suite|pytest)$"), "tests.run"),
+    (re.compile(r"^run the tests$"), "tests.run"),
+    (re.compile(r"^(?:run (?:the )?)?(?:lint|linter|ruff)$"), "lint.run"),
+    (re.compile(r"^(?:check |run )?(?:the )?(?:types|type check|typecheck|mypy)$"), "types.check"),
+    (re.compile(r"^(?:check |run )?format(?: check)?$"), "format.check"),
+    (re.compile(r"^docker ps$"), "docker.ps"),
+    (re.compile(r"^docker images$"), "docker.images"),
+)
+
+#: Folders people name rather than describe. Matched before applications, because
+#: "open documents" is a directory and "open notepad" is a program, and only the
+#: name distinguishes them.
+_KNOWN_FOLDERS = frozenset(
+    {"downloads", "documents", "desktop", "pictures", "music", "videos", "home"}
+)
+
+#: Explicitly-named folders: "open the downloads folder", "open my documents".
+_FOLDER_PATTERN = re.compile(
+    r"^(?:open|show|go to) (?:my |the )?(?P<target>[\w\s-]+?)(?: folder| directory)?$"
+)
+
+#: File search. Distinct from opening, and the target is a query rather than a name.
+_SEARCH_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:find|search for|look for) (?:my |the )?(?P<target>.+)$"),
+    re.compile(r"^(?:find|search) files? (?:called |named |matching )?(?P<target>.+)$"),
+)
+
+#: Questions about what is currently on screen. The *classification* is local even
+#: though answering still needs a vision model — which saves the classification
+#: tokens on every one of these.
+_SCREEN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^what(?:'s| is)(?: on)? (?:my |the )?screen(?: right now| say(?:ing)?)?$"),
+    re.compile(r"^(?:read|what does) (?:the )?(?P<target>.*(?:error|message|dialog|screen).*)$"),
+    re.compile(r"^what am i looking at$"),
+)
+
 #: Commands whose target is captured from the phrasing.
+#:
+#: Checked *last*, because these verbs are the greediest in the language. "run" once
+#: matched "run the tests" as an application named "the tests" — a confidently wrong
+#: answer where falling through to the model would have been right.
 _TARGET_PATTERNS: tuple[tuple[re.Pattern[str], IntentType], ...] = (
-    (re.compile(r"^(?:open|launch|start|run) (?P<target>.+)$"), IntentType.OPEN_APPLICATION),
+    (re.compile(r"^(?:open|launch|start) (?P<target>.+)$"), IntentType.OPEN_APPLICATION),
     (re.compile(r"^(?:close|quit|exit|kill) (?P<target>.+)$"), IntentType.CLOSE_APPLICATION),
 )
 
@@ -199,18 +253,42 @@ def classify_locally(utterance: str) -> IntentClassification | None:
     if not text or len(text.split()) > _MAX_WORDS:
         return None
 
+    # Order is the whole design here: every rule below is checked before the
+    # greedy verb patterns, because "open" and "find" will otherwise claim a
+    # request that a more specific rule reads correctly.
     for pattern, intent in _EXACT_PATTERNS:
         if pattern.match(text):
             return _classification(intent, None)
 
-    # Checked before the application patterns, which would otherwise claim
+    for pattern, operation in _DEV_PATTERNS:
+        if pattern.match(text):
+            return _classification(IntentType.RUN_DEV_COMMAND, operation)
+
+    # Before the application patterns, which would otherwise claim
     # "open github.com" as an application named "github.com".
     if match := _WEBSITE_PATTERN.match(text):
         return _classification(IntentType.OPEN_WEBSITE, match.group("target"))
 
+    for pattern in _SCREEN_PATTERNS:
+        if match := pattern.match(text):
+            # The question itself is the target; the analyst needs it, not a label.
+            return _classification(IntentType.LOOK_AT_SCREEN, text)
+
     for pattern, intent in _LEVEL_PATTERNS:
         if match := pattern.match(text):
             return _classification(intent, match.group("target"))
+
+    if match := _FOLDER_PATTERN.match(text):
+        target = match.group("target").strip()
+        # Only names that are unambiguously directories. Everything else — an
+        # application, a document, a project — reads identically to a pattern, and
+        # guessing wrong sends "open notepad" to the file explorer.
+        if target in _KNOWN_FOLDERS or text.rstrip(".").endswith(("folder", "directory")):
+            return _classification(IntentType.OPEN_FOLDER, target)
+
+    for pattern in _SEARCH_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.SEARCH_FILES, match.group("target").strip())
 
     for pattern, intent in _TARGET_PATTERNS:
         if match := pattern.match(text):

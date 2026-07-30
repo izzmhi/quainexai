@@ -14,8 +14,9 @@ import httpx
 import pytest
 
 from quainex.config.settings import Settings
-from quainex.core.brain import Brain, IntentClassification, IntentType
-from quainex.core.commands import build_executor
+from quainex.core.brain import Brain, Intent, IntentClassification, IntentType
+from quainex.core.commands import CommandStatus, build_executor
+from quainex.core.commands.base import CommandResult
 from quainex.core.exceptions import ProviderError
 from quainex.integrations.telegram import (
     TELEGRAM_BLOCKED_INTENTS,
@@ -371,6 +372,142 @@ def test_output_revealing_intents_are_blocked():
     assert IntentType.CLIPBOARD in TELEGRAM_BLOCKED_INTENTS
     assert IntentType.LOOK_AT_SCREEN in TELEGRAM_BLOCKED_INTENTS
     assert IntentType.READ_DOCUMENT in TELEGRAM_BLOCKED_INTENTS
+
+
+class PhotoRecorder(SendRecorder):
+    """Also records photo uploads, so a test can prove what actually left.
+
+    Attributes:
+        photos: One entry per uploaded image: ``(filename, bytes)``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.photos: list[tuple[str, int]] = []
+
+    async def post(self, url: str, **kwargs: object) -> object:
+        if url.endswith("/sendPhoto"):
+            files = kwargs.get("files")
+            if isinstance(files, dict) and "photo" in files:
+                name, payload, *_ = files["photo"]
+                self.photos.append((str(name), len(payload)))
+            return _OkResponse()
+        return await super().post(url, **kwargs)
+
+
+def _screenshot_result(path: Path) -> CommandResult:
+    """A successful screenshot result carrying a saved path."""
+    return CommandResult(
+        status=CommandStatus.SUCCEEDED,
+        intent="screenshot",
+        message=f"Saved a screenshot to {path}.",
+        executed=True,
+        data={"path": str(path)},
+    )
+
+
+def _screenshot_intent() -> Intent:
+    """An intent asking for a screenshot."""
+    return Intent(
+        intent=IntentType.SCREENSHOT,
+        target=None,
+        confidence=1.0,
+        reasoning="test",
+        requires_confirmation=False,
+    )
+
+
+async def test_the_image_is_not_sent_unless_uploading_is_enabled(tmp_path):
+    """Default behaviour discloses nothing: the reply is a path, not a picture."""
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"pretend png")
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    recorder = PhotoRecorder()
+
+    await bridge._maybe_send_screenshot(
+        recorder,  # type: ignore[arg-type]
+        7,
+        _screenshot_intent(),
+        _screenshot_result(image),
+    )
+
+    assert recorder.photos == []
+
+
+async def test_the_image_is_uploaded_when_enabled(tmp_path):
+    """The owner asked for it, so it works — and the picture is what is sent."""
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"pretend png bytes")
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_send_screenshots=True,
+    )
+    recorder = PhotoRecorder()
+
+    await bridge._maybe_send_screenshot(
+        recorder,  # type: ignore[arg-type]
+        7,
+        _screenshot_intent(),
+        _screenshot_result(image),
+    )
+
+    assert recorder.photos == [("shot.png", len(b"pretend png bytes"))]
+
+
+async def test_an_oversized_screenshot_says_so_rather_than_failing_silently(tmp_path):
+    """Telegram rejects photos over 10 MB, and a silent rejection looks like a bug."""
+    from quainex.integrations.telegram import _MAX_PHOTO_BYTES
+
+    image = tmp_path / "huge.png"
+    image.write_bytes(b"x" * (_MAX_PHOTO_BYTES + 1))
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_send_screenshots=True,
+    )
+    recorder = PhotoRecorder()
+
+    await bridge._maybe_send_screenshot(
+        recorder,  # type: ignore[arg-type]
+        7,
+        _screenshot_intent(),
+        _screenshot_result(image),
+    )
+
+    assert recorder.photos == []
+    assert "limit" in recorder.sent[0]
+
+
+async def test_only_screenshots_are_uploaded(tmp_path):
+    """The switch is for screenshots, not for any command that happens to have a path."""
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"pretend png")
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_send_screenshots=True,
+    )
+    recorder = PhotoRecorder()
+    other = Intent(
+        intent=IntentType.SEARCH_FILES,
+        target="invoice",
+        confidence=1.0,
+        reasoning="test",
+        requires_confirmation=False,
+    )
+
+    await bridge._maybe_send_screenshot(
+        recorder,  # type: ignore[arg-type]
+        7,
+        other,
+        _screenshot_result(image),
+    )
+
+    assert recorder.photos == []
 
 
 def test_the_block_is_about_the_reply_not_the_action():

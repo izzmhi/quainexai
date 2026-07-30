@@ -281,6 +281,20 @@ class Settings(BaseSettings):
     # Start polling automatically when the application starts.
     telegram_autostart: bool = False
 
+    # Upload the actual image when a screenshot is taken from Telegram, instead of
+    # replying with the file path.
+    #
+    # **This sends a picture of your screen to Telegram's servers.** The Bot API is
+    # not end-to-end encrypted, so the image is readable by Telegram and lives in
+    # your chat history until you delete it. Whatever was on screen — a password
+    # manager, a private message, a bank page — goes with it.
+    #
+    # That is a real cost and it buys something real: seeing your machine from
+    # anywhere, which is most of the point of a phone bridge. It is the owner's call
+    # to make, so it is a setting rather than a refusal — but it defaults to off,
+    # because nobody should discover this behaviour by surprise.
+    telegram_send_screenshots: bool = False
+
     # --- Plugins (Phase 9) ------------------------------------------------
     # Where plugins are looked for. Relative paths resolve to the repo root.
     plugin_dir: Path = Path("plugins_installed")
