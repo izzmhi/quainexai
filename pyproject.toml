@@ -43,6 +43,13 @@ camera = [
     "pygrabber>=0.2",  # DirectShow webcam frames
     "numpy>=2.0",      # frame buffers
 ]
+# Exact volume control. pycaw wraps the Core Audio COM interface; comtypes is
+# already pulled by the camera extra. Without it, up/down/mute still work via the
+# media keys — only an exact percentage needs this.
+#   pip install -e ".[audio]"
+audio = [
+    "pycaw>=20240210",  # IAudioEndpointVolume, for set-to-a-percentage
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -118,7 +125,7 @@ disallow_untyped_defs = false
 # These ship no type stubs and have no types-* packages. Each is reached through
 # a Protocol boundary, so the untyped surface is confined to one adapter module.
 [[tool.mypy.overrides]]
-module = ["pyperclip", "faster_whisper", "sounddevice", "pygrabber", "pygrabber.*"]
+module = ["pyperclip", "faster_whisper", "sounddevice", "pygrabber", "pygrabber.*", "pycaw", "pycaw.*"]
 ignore_missing_imports = true
 
 # pygrabber's classes carry no annotations, so every call reads as untyped. The

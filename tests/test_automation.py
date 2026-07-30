@@ -17,7 +17,7 @@ from quainex.core.automation.applications import (
     resolve_application,
 )
 from quainex.core.automation.windows import WindowsDesktopController
-from quainex.core.exceptions import CommandNotAllowedError
+from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
 
 # -- application allowlist -------------------------------------------------
 
@@ -147,9 +147,16 @@ def test_bare_domain_is_upgraded_to_https(controller, monkeypatch):
     assert "example.com" in message
 
 
-def test_unknown_application_refusal_lists_alternatives(controller):
-    with pytest.raises(CommandNotAllowedError) as exc_info:
-        controller.open_application("Doom Eternal")
-    message = str(exc_info.value)
-    assert "not an allowed application" in message
-    assert "Visual Studio Code" in message, "a refusal should say what is available"
+def test_an_application_not_installed_anywhere_is_reported_clearly(controller):
+    """Open-any-app changed this from a refusal to a not-found.
+
+    The allowlist is no longer a wall: a name not in it is searched for among the
+    machine's installed apps (Start menu, App Paths, PATH). So a genuinely absent
+    program is "could not find", not "not allowed" — the allowlist only ever
+    *added* names, it never restricted them.
+    """
+    with pytest.raises(CommandExecutionError) as exc_info:
+        # A name that matches nothing curated and nothing installed.
+        controller.open_application("Nonexistent Program Xyzzy 12345")
+
+    assert "Could not find" in str(exc_info.value)

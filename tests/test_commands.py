@@ -88,6 +88,24 @@ class FakeDesktopController:
     def set_brightness(self, change: LevelChange) -> str:
         return self._record("set_brightness", change)
 
+    def set_keyboard_light(self, *, enabled: bool) -> str:
+        return self._record("set_keyboard_light", enabled)
+
+    def media_control(self, action: str) -> str:
+        self._record("media_control", action)
+        return f"fake:media:{action}"
+
+    def control_window(self, action: str, name: str | None) -> str:
+        return self._record("control_window", (action, name))
+
+    def list_running_apps(self, limit: int = 15) -> list[str]:
+        self._record("list_running_apps", limit)
+        return ["Chrome", "Spotify", "VS Code"]
+
+    def kill_process(self, name: str) -> str:
+        self._record("kill_process", name)
+        return f"Closed 1 process matching '{name}'."
+
     def screenshot(self, destination: Path) -> str:
         # Actually writes a file: the real controller's contract is that the
         # path exists afterwards, and the vision tests check that a captured
@@ -433,6 +451,93 @@ async def test_search_results_are_returned_as_data(tmp_path):
     assert result.status is CommandStatus.SUCCEEDED
     assert result.data is not None
     assert result.data["results"][0]["path"] == "C:/fake/report.pdf"
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [("play", ("media_control", "play")), ("pause", ("media_control", "pause"))],
+)
+async def test_media_control_reaches_the_controller(tmp_path, target, expected):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.MEDIA_CONTROL, target)
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert expected in desktop.calls
+
+
+async def test_window_control_passes_action_and_name(tmp_path):
+    from quainex.core.brain import IntentParameter
+
+    desktop = FakeDesktopController()
+    intent = Intent(
+        intent=IntentType.WINDOW_CONTROL,
+        target="chrome",
+        parameters=[IntentParameter(key="action", value="minimize")],
+        confidence=1.0,
+        reasoning="test",
+        requires_confirmation=False,
+    )
+    result = await build_executor(desktop, _settings(tmp_path)).execute(intent)
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert ("control_window", ("minimize", "chrome")) in desktop.calls
+
+
+async def test_running_apps_lists_without_side_effect(tmp_path):
+    result = await build_executor(FakeDesktopController(), _settings(tmp_path)).execute(
+        _intent(IntentType.RUNNING_APPS, target=None)
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert result.executed is False
+    assert "Chrome" in result.message
+
+
+async def test_close_process_kills_by_name(tmp_path):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.CLOSE_PROCESS, "chrome")
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert ("kill_process", "chrome") in desktop.calls
+
+
+async def test_panic_composes_photo_lock_and_location(tmp_path, monkeypatch):
+    """The anti-theft flow: capture, report, lock — in that order.
+
+    The photo must be taken *before* the lock, or it catches a lock screen instead
+    of whoever is at the machine. The public-IP lookup is stubbed so the test makes
+    no network call.
+    """
+    import quainex.core.commands.builtin as builtin
+
+    async def fake_location() -> str:
+        return "Public IP 1.2.3.4 · Lagos, Nigeria"
+
+    monkeypatch.setattr(builtin, "_public_ip_location", fake_location)
+
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.PANIC, target=None)
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    actions = [action for action, _ in desktop.calls]
+    assert actions.index("capture_webcam") < actions.index("lock_screen")
+    assert "wifi_status" in actions
+    assert result.data is not None and "path" in result.data  # webcam photo to send
+    assert "Lagos" in result.message
+
+
+async def test_keyboard_light_maps_on_off(tmp_path):
+    desktop = FakeDesktopController()
+    await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.KEYBOARD_LIGHT, "on")
+    )
+    assert ("set_keyboard_light", True) in desktop.calls
 
 
 async def test_create_folder_reaches_the_controller(tmp_path):

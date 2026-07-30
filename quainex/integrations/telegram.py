@@ -576,9 +576,21 @@ class TelegramBridge:
             intent: What was asked for.
             result: What happened, carrying the saved path.
         """
-        if intent.intent not in {IntentType.SCREENSHOT, IntentType.WEBCAM} or not result.ok:
+        if (
+            intent.intent
+            not in {
+                IntentType.SCREENSHOT,
+                IntentType.WEBCAM,
+                IntentType.PANIC,
+            }
+            or not result.ok
+        ):
             return
-        if not self._settings.telegram_send_screenshots:
+        # Panic overrides the screenshot switch on purpose: a stolen-laptop photo is
+        # the entire point of triggering it, so it is not the moment to honour a
+        # "don't send images" preference. Screenshots and ordinary webcam shots
+        # still respect the switch.
+        if intent.intent is not IntentType.PANIC and not self._settings.telegram_send_screenshots:
             return
 
         path_value = (result.data or {}).get("path")

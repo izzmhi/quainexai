@@ -65,6 +65,13 @@ class IntentType(StrEnum):
     SHUTDOWN = "shutdown"
     SET_VOLUME = "set_volume"
     SET_BRIGHTNESS = "set_brightness"
+    KEYBOARD_LIGHT = "keyboard_light"
+    MEDIA_CONTROL = "media_control"
+    WINDOW_CONTROL = "window_control"
+    RUNNING_APPS = "running_apps"
+    CLOSE_PROCESS = "close_process"
+    LOCATE_DEVICE = "locate_device"
+    PANIC = "panic"
 
     # --- Utilities ---
     SCREENSHOT = "screenshot"
@@ -122,6 +129,28 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
     ),
     IntentType.SET_BRIGHTNESS: (
         "Change screen brightness. target = 'up', 'down', or a number 0-100."
+    ),
+    IntentType.KEYBOARD_LIGHT: ("Turn the keyboard backlight on or off. target = 'on' or 'off'."),
+    IntentType.MEDIA_CONTROL: (
+        "Control media playback (any player, including Spotify). target = 'play', "
+        "'pause', 'next', 'previous' or 'stop'."
+    ),
+    IntentType.WINDOW_CONTROL: (
+        "Minimise, maximise or restore a window, or minimise everything. target = "
+        "the window/app name (or 'all'). Put the action in parameters as key "
+        "'action' = minimize|maximize|restore|minimize_all."
+    ),
+    IntentType.RUNNING_APPS: "List the applications currently running. No target.",
+    IntentType.CLOSE_PROCESS: (
+        "Force-close a running program by name (any process, not just allowlisted). "
+        "target = the program name."
+    ),
+    IntentType.LOCATE_DEVICE: (
+        "Report where this machine is: Wi-Fi network, public IP and rough location. No target."
+    ),
+    IntentType.PANIC: (
+        "Anti-theft: lock the screen, take a webcam photo, and report the network "
+        "and location — all sent to the phone. No target."
     ),
     IntentType.SCREENSHOT: "Capture the screen. No target.",
     IntentType.WEBCAM: (

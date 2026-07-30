@@ -50,6 +50,39 @@ _DDG_INSTANT_ANSWER = "https://api.duckduckgo.com/"
 #: the chat.
 _MAX_ANSWER_CHARS = 600
 
+#: Keyless public-IP + geolocation service. Free and token-free (no AI). The lookup
+#: is coarse — city-level, from the IP — which is exactly right for "roughly where
+#: is my laptop" and honest about not being GPS.
+_IP_LOOKUP = "http://ip-api.com/json/"
+
+
+async def _public_ip_location() -> str:
+    """Report the machine's public IP and rough location.
+
+    Never raises: a failed lookup returns a plain note, because the caller ("where
+    is my laptop", panic) still has useful Wi-Fi information to report alongside it.
+
+    Returns:
+        A one-line summary, or a note that the lookup failed.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(
+                _IP_LOOKUP, params={"fields": "query,city,regionName,country,isp"}
+            )
+            response.raise_for_status()
+            data = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _log.info("ip_lookup_failed", error=str(exc))
+        return "Public IP and location are unavailable (no internet?)."
+
+    place = ", ".join(
+        part for part in (data.get("city"), data.get("regionName"), data.get("country")) if part
+    )
+    ip = data.get("query", "unknown")
+    isp = data.get("isp", "")
+    return f"Public IP {ip}" + (f" · {place}" if place else "") + (f" · {isp}" if isp else "")
+
 
 async def _instant_answer(query: str) -> str | None:
     """Fetch a one-line answer for a search, when one exists.
@@ -181,6 +214,58 @@ def build_commands(settings: Settings) -> list[Command]:
         return CommandOutcome(
             message=ctx.desktop.screenshot(destination), data={"path": str(destination)}
         )
+
+    async def keyboard_light(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        on = _target(intent).lower() in {"on", "enable", "up", "bright"}
+        return CommandOutcome(message=ctx.desktop.set_keyboard_light(enabled=on))
+
+    async def media_control(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.media_control(_target(intent).lower()))
+
+    async def window_control(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        action = intent.parameters_as_dict().get("action", "minimize").lower()
+        name = _target(intent) or None
+        return CommandOutcome(message=ctx.desktop.control_window(action, name))
+
+    async def running_apps(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        apps = ctx.desktop.list_running_apps()
+        listed = ", ".join(apps) if apps else "nothing with a visible window"
+        return CommandOutcome(message=f"Running: {listed}.", data={"apps": apps})
+
+    async def close_process(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.kill_process(_target(intent)))
+
+    async def locate_device(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        wifi = ctx.desktop.wifi_status()
+        location = await _public_ip_location()
+        return CommandOutcome(
+            message=f"{wifi}\n{location}", data={"wifi": wifi, "location": location}
+        )
+
+    async def panic(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
+        # Composed from parts that already exist and are already safe. Order matters:
+        # take the photo *before* locking, so the shot catches whoever is at the
+        # machine rather than a lock screen.
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        photo = settings.screenshot_dir / f"quainex-panic-{stamp}.jpg"
+        lines: list[str] = []
+        data: dict[str, object] = {}
+
+        try:
+            ctx.desktop.capture_webcam(photo)
+            data["path"] = str(photo)
+        except (CommandExecutionError, CommandNotAllowedError) as exc:
+            lines.append(f"(webcam unavailable: {exc.message})")
+
+        lines.append(ctx.desktop.wifi_status())
+        lines.append(await _public_ip_location())
+
+        try:
+            lines.append(ctx.desktop.lock_screen())
+        except CommandExecutionError as exc:
+            lines.append(f"(could not lock: {exc.message})")
+
+        return CommandOutcome(message="🚨 Panic triggered.\n" + "\n".join(lines), data=data)
 
     async def create_folder(ctx: CommandContext, intent: Intent) -> CommandOutcome:
         return CommandOutcome(message=ctx.desktop.create_folder(_target(intent)))
@@ -390,6 +475,46 @@ def build_commands(settings: Settings) -> list[Command]:
             requires_target=True,
         ),
         Command(
+            intent=IntentType.KEYBOARD_LIGHT,
+            summary="Turn the keyboard backlight on or off (where the firmware allows).",
+            handler=keyboard_light,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.MEDIA_CONTROL,
+            summary="Play, pause, skip or stop media in any player.",
+            handler=media_control,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.WINDOW_CONTROL,
+            summary="Minimise, maximise or restore a window.",
+            handler=window_control,
+        ),
+        Command(
+            intent=IntentType.RUNNING_APPS,
+            summary="List the applications currently running.",
+            handler=running_apps,
+            has_side_effect=False,
+        ),
+        Command(
+            intent=IntentType.CLOSE_PROCESS,
+            summary="Force-close a running program by name.",
+            handler=close_process,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.LOCATE_DEVICE,
+            summary="Report the machine's network and rough location.",
+            handler=locate_device,
+            has_side_effect=False,
+        ),
+        Command(
+            intent=IntentType.PANIC,
+            summary="Anti-theft: lock, photograph and locate, sent to the phone.",
+            handler=panic,
+        ),
+        Command(
             intent=IntentType.SCREENSHOT,
             summary="Capture the screen to a PNG file.",
             handler=screenshot,
@@ -537,7 +662,9 @@ def _coerce_level(target: str) -> LevelChange:
         return "down"
     if cleaned in {"mute", "muted", "silence"}:
         return "mute"
+    if cleaned in {"unmute", "unmuted", "unsilence"}:
+        return "unmute"
 
     raise CommandNotAllowedError(
-        f"Cannot interpret '{target}' as a level; use 'up', 'down', 'mute' or 0-100."
+        f"Cannot interpret '{target}' as a level; use 'up', 'down', 'mute', 'unmute' or 0-100."
     )

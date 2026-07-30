@@ -268,6 +268,67 @@ _LEVEL_PATTERNS: tuple[tuple[re.Pattern[str], IntentType], ...] = (
     ),
 )
 
+#: Media transport. Play and pause map to a toggle key downstream, but the intent
+#: still records which was meant.
+_MEDIA_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"^(?:play|resume)(?: (?:the )?(?:music|song|track|audio)| my music| it)?$"),
+        "play",
+    ),
+    (re.compile(r"^(?:play|resume) (?:the )?music on spotify$"), "play"),
+    (
+        re.compile(r"^pause(?: (?:the )?(?:music|song|track|playback|audio)| it| spotify)?$"),
+        "pause",
+    ),
+    (re.compile(r"^(?:next|skip)(?: (?:track|song))?$"), "next"),
+    (re.compile(r"^(?:previous|prev|back)(?: (?:track|song))?$"), "previous"),
+    (re.compile(r"^stop(?: (?:the )?(?:music|song|playback|audio))?$"), "stop"),
+)
+
+#: Window control. The name is captured; the action rides in parameters so one
+#: intent covers all of them.
+_WINDOW_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"^(?:minimize|minimise) (?:all|everything|all windows)$"), "minimize_all"),
+    (re.compile(r"^(?:show|go to) (?:the )?desktop$"), "minimize_all"),
+    (re.compile(r"^(?:minimize|minimise) (?P<name>.+)$"), "minimize"),
+    (re.compile(r"^(?:maximize|maximise) (?P<name>.+)$"), "maximize"),
+    (re.compile(r"^(?:restore|unminimize) (?P<name>.+)$"), "restore"),
+)
+
+#: "what's running", "list running apps".
+_RUNNING_APPS_PATTERN = re.compile(
+    r"^(?:what(?:'s| is) running|what apps are (?:open|running)|running apps|"
+    r"list (?:running )?apps|what programs are (?:open|running)|show running apps)$"
+)
+
+#: Force-close by name. Distinct from "close X", which asks the app to quit.
+_KILL_PATTERN = re.compile(
+    r"^(?:kill|force close|force quit|force kill|end) (?:the )?(?P<target>.+)$"
+)
+
+#: "where is my laptop", "what's my ip".
+_LOCATE_PATTERN = re.compile(
+    r"^(?:where(?:'s| is) (?:my |this )?(?:laptop|computer|pc|device)|"
+    r"locate (?:my )?(?:laptop|computer|device)|"
+    r"what(?:'s|s| is) my (?:public )?ip|public ip|my location|where am i)$"
+)
+
+#: Anti-theft trigger.
+_PANIC_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:panic|panic mode|anti[\s-]?theft)$"),
+    re.compile(
+        r"^(?:someone (?:took|has|stole|grabbed) (?:my )?(?:laptop|computer|pc)|"
+        r"my (?:laptop|computer) (?:was|is|got) stolen)$"
+    ),
+)
+
+#: Keyboard backlight, direction captured.
+_KEYBOARD_LIGHT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:turn|switch) (?P<t>on|off) (?:the )?keyboard (?:light|backlight|leds?)$"),
+    re.compile(r"^(?:turn|switch) (?:the )?keyboard (?:light|backlight|leds?) (?P<t>on|off)$"),
+    re.compile(r"^keyboard (?:light|backlight|leds?) (?P<t>on|off)$"),
+)
+
 #: Reasoning recorded on a local match, so the audit trail distinguishes a
 #: classification nobody paid for from one a model produced.
 _REASON = "Matched a built-in pattern locally; no model call was needed."
@@ -334,6 +395,36 @@ def classify_locally(utterance: str) -> IntentClassification | None:
             # A pattern with a fixed target ("status") uses it; the on/off ones
             # capture the direction from the group.
             return _classification(IntentType.WIFI, fixed or match.group("t"))
+
+    for pattern, action in _MEDIA_PATTERNS:
+        if pattern.match(text):
+            return _classification(IntentType.MEDIA_CONTROL, action)
+
+    for pattern, action in _WINDOW_PATTERNS:
+        if match := pattern.match(text):
+            name = match.groupdict().get("name")
+            return _classification(
+                IntentType.WINDOW_CONTROL,
+                (name or "all").strip(),
+                parameters=[IntentParameter(key="action", value=action)],
+            )
+
+    if _RUNNING_APPS_PATTERN.match(text):
+        return _classification(IntentType.RUNNING_APPS, None)
+
+    if match := _KILL_PATTERN.match(text):
+        return _classification(IntentType.CLOSE_PROCESS, match.group("target").strip())
+
+    if _LOCATE_PATTERN.match(text):
+        return _classification(IntentType.LOCATE_DEVICE, None)
+
+    for pattern in _PANIC_PATTERNS:
+        if pattern.match(text):
+            return _classification(IntentType.PANIC, None)
+
+    for pattern in _KEYBOARD_LIGHT_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.KEYBOARD_LIGHT, match.group("t"))
 
     # Before file search, so "google X" is a web search rather than a file query.
     for pattern in _WEB_SEARCH_PATTERNS:

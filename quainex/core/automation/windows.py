@@ -47,17 +47,13 @@ from urllib.parse import urlparse
 
 import psutil
 
-from quainex.core.automation.applications import (
-    known_application_names,
-    resolve_application,
-)
+from quainex.core.automation.applications import resolve_application
 from quainex.core.automation.desktop import FileHit, LevelChange, SystemSnapshot
 from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
 from quainex.core.logging import get_logger
 
 if TYPE_CHECKING:
     from quainex.config.settings import Settings
-    from quainex.core.automation.applications import ApplicationSpec
 
 _log = get_logger(__name__)
 
@@ -68,7 +64,22 @@ _VK_VOLUME_UP = 0xAF
 _KEYEVENTF_KEYUP = 0x0002
 
 #: How many times a "up"/"down" request nudges the level. Each press is ~2%.
+#: Only the media-key fallback path uses this.
 _VOLUME_STEPS = 5
+
+#: Percentage points an "up"/"down" moves when Core Audio is available.
+_VOLUME_STEP_PERCENT = 10
+
+# Virtual key codes for the media transport keys.
+_VK_MEDIA_NEXT = 0xB0
+_VK_MEDIA_PREV = 0xB1
+_VK_MEDIA_STOP = 0xB2
+_VK_MEDIA_PLAY_PAUSE = 0xB3
+
+# ShowWindow commands, for minimise/maximise/restore.
+_SW_MINIMIZE = 6
+_SW_MAXIMIZE = 3
+_SW_RESTORE = 9
 
 #: URL schemes that may be opened. `file:` is excluded deliberately — it would
 #: turn "open a website" into "open anything on disk".
@@ -200,6 +211,36 @@ def resolve_known_folder(name: str) -> Path | None:
     return Path(value) if result == 0 and value else None
 
 
+def _app_paths_executable(needle: str) -> Path | None:
+    """Look up an executable in the Windows ``App Paths`` registry.
+
+    This is the key the Run dialog consults, so anything you can launch by typing
+    its name into Run is found here — Chrome, Firefox, and most installers register
+    themselves in it.
+
+    Args:
+        needle: Lower-cased application name, without an extension.
+
+    Returns:
+        The registered executable path, or ``None``.
+
+    """
+    import winreg
+
+    subkey = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{needle}.exe"
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                # The empty name reads a key's default value.
+                value, _ = winreg.QueryValueEx(key, "")
+        except OSError:
+            continue
+        path = Path(str(value).strip('"'))
+        if path.is_file():
+            return path
+    return None
+
+
 def _system_executable(name: str) -> str:
     """Resolve a Windows system executable to an absolute path.
 
@@ -243,72 +284,188 @@ class WindowsDesktopController:
     # --- Applications ----------------------------------------------------
 
     def open_application(self, name: str) -> str:
-        """Launch an allowlisted application.
+        """Launch an application by name.
+
+        The curated allowlist is tried first — it maps friendly names ("vs code")
+        to the right executable and knows the Store-app URIs that have no ``.exe``.
+        When a name is not in it, the search widens to whatever is actually
+        installed: a matching Start-menu shortcut, then an ``App Paths`` registry
+        entry, then ``PATH``. So "open notepad" works whether or not notepad was
+        ever curated, which is what "open any application on the machine" means.
+
+        The launch itself is always an argument list or a resolved shortcut path —
+        never a shell string built from the utterance, so a name with shell
+        metacharacters cannot become a second command.
 
         Args:
-            name: Friendly application name from the utterance.
+            name: Application name from the utterance.
 
         Returns:
             A short description of what was launched.
 
         Raises:
-            CommandNotAllowedError: The application is not in the catalogue.
-            CommandExecutionError: The application is allowlisted but not installed.
+            CommandExecutionError: Nothing on the machine matches the name.
         """
-        spec = self._require_application(name)
-
-        for executable in spec.executables:
-            resolved = shutil.which(executable)
-            if resolved:
-                # Argument list, never a shell string, and no model-supplied args.
-                subprocess.Popen([resolved])  # noqa: S603
-                _log.info("application_opened", application=spec.key, executable=resolved)
+        spec = resolve_application(name)
+        if spec is not None:
+            for executable in spec.executables:
+                resolved = shutil.which(executable)
+                if resolved:
+                    subprocess.Popen([resolved])  # noqa: S603 - argument list, no shell
+                    _log.info("application_opened", application=spec.key, executable=resolved)
+                    return f"Opened {spec.display}."
+            if spec.uri:
+                os.startfile(spec.uri)  # noqa: S606 - fixed protocol URI from the catalogue
+                _log.info("application_opened", application=spec.key, uri=spec.uri)
                 return f"Opened {spec.display}."
 
-        if spec.uri:
-            os.startfile(spec.uri)  # noqa: S606 - fixed protocol URI from the catalogue
-            _log.info("application_opened", application=spec.key, uri=spec.uri)
-            return f"Opened {spec.display}."
+        target = self._find_installed_application(name)
+        if target is not None:
+            os.startfile(target)  # noqa: S606 - resolved shortcut/exe, not a shell string
+            _log.info("application_opened", resolved=str(target), curated=False)
+            return f"Opened {target.stem}."
 
         raise CommandExecutionError(
-            f"{spec.display} is allowed but could not be found on this machine."
+            f"Could not find an application called '{name}' on this machine."
         )
 
-    def close_application(self, name: str) -> str:
-        """Terminate an allowlisted application.
+    def _find_installed_application(self, name: str) -> Path | None:
+        """Locate an installed application by name outside the allowlist.
 
-        Sends a terminate signal rather than a kill, so the application can save
-        state and prompt about unsaved work.
+        Order: Start-menu shortcuts (the names people actually see), then the
+        ``App Paths`` registry (what "Run" uses), then ``PATH``.
 
         Args:
-            name: Friendly application name from the utterance.
+            name: The application name.
+
+        Returns:
+            A launchable path — a ``.lnk`` or an ``.exe`` — or ``None``.
+        """
+        needle = name.strip().lower().removesuffix(".exe").removesuffix(".lnk")
+        if not needle:
+            return None
+
+        shortcut = self._find_start_menu_shortcut(needle)
+        if shortcut is not None:
+            return shortcut
+
+        registered = _app_paths_executable(needle)
+        if registered is not None:
+            return registered
+
+        on_path = shutil.which(needle) or shutil.which(f"{needle}.exe")
+        return Path(on_path) if on_path else None
+
+    @staticmethod
+    def _find_start_menu_shortcut(needle: str) -> Path | None:
+        """Find a Start-menu ``.lnk`` whose name matches.
+
+        Both the machine-wide and per-user Start menus are searched. An exact name
+        match wins over a substring, so "word" opens Word rather than WordPad.
+
+        Args:
+            needle: Lower-cased application name.
+
+        Returns:
+            The best matching shortcut, or ``None``.
+        """
+        roots = [
+            Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs",
+            Path(os.environ.get("APPDATA", ""))
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs",
+        ]
+        exact: Path | None = None
+        partial: Path | None = None
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for lnk in root.rglob("*.lnk"):
+                stem = lnk.stem.lower()
+                if stem == needle:
+                    exact = exact or lnk
+                elif needle in stem and partial is None:
+                    partial = lnk
+        return exact or partial
+
+    def close_application(self, name: str) -> str:
+        """Terminate a running application by name.
+
+        Matches three ways, because "close spotify" failing while Spotify is plainly
+        open was the bug this fixes — the old version only knew allowlisted apps and
+        only matched their *exact* process name, so anything whose window title
+        differs from its executable looked "not running":
+
+          * the allowlist's known process names, when the app is curated;
+          * the process name itself (exact, then substring);
+          * the process that owns a window whose title contains the name — which is
+            what catches an app the process name would never reveal.
+
+        Sends a terminate, not a kill, so the app can save and prompt on the way out.
+
+        Args:
+            name: Application name from the utterance.
 
         Returns:
             A short description of what was closed.
 
         Raises:
-            CommandNotAllowedError: The application is not in the catalogue.
-            CommandExecutionError: No matching process was running.
+            CommandExecutionError: Nothing matching is running.
         """
-        spec = self._require_application(name)
-        wanted = {p.lower() for p in spec.process_names}
-        closed = 0
+        needle = name.strip().lower().removesuffix(".exe")
+        if not needle:
+            raise CommandNotAllowedError("Name an application to close.")
 
+        spec = resolve_application(name)
+        wanted = {p.lower().removesuffix(".exe") for p in spec.process_names} if spec else set()
+        window_pids = self._pids_for_window(needle)
+
+        closed = 0
         for process in psutil.process_iter(["name"]):
-            process_name = (process.info.get("name") or "").lower()
-            if process_name in wanted:
+            proc_name = (process.info.get("name") or "").lower().removesuffix(".exe")
+            matches = (
+                proc_name in wanted
+                or proc_name == needle
+                or (len(needle) >= 3 and needle in proc_name)
+                or process.pid in window_pids
+            )
+            if matches:
                 try:
                     process.terminate()
                     closed += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    # Vanished between listing and terminating, or protected.
                     continue
 
+        label = spec.display if spec else name
         if closed == 0:
-            raise CommandExecutionError(f"{spec.display} does not appear to be running.")
+            raise CommandExecutionError(f"{label} does not appear to be running.")
 
-        _log.info("application_closed", application=spec.key, processes=closed)
-        return f"Closed {spec.display} ({closed} process{'es' if closed > 1 else ''})."
+        _log.info("application_closed", application=label, processes=closed)
+        return f"Closed {label} ({closed} process{'es' if closed > 1 else ''})."
+
+    def _pids_for_window(self, needle: str) -> set[int]:
+        """Return process ids owning a visible window whose title contains ``needle``.
+
+        Args:
+            needle: Lower-cased substring to match against window titles.
+
+        Returns:
+            The owning process ids.
+        """
+        pids: set[int] = set()
+        for hwnd, title in self._enum_visible_windows():
+            if needle in title.lower():
+                pid = ctypes.c_ulong()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value:
+                    pids.add(pid.value)
+        return pids
 
     # --- Navigation ------------------------------------------------------
 
@@ -587,32 +744,54 @@ class WindowsDesktopController:
     def set_volume(self, change: LevelChange) -> str:
         """Adjust the system volume.
 
+        An exact percentage uses the Core Audio API (see ``automation.audio``),
+        which is the whole reason this was rewritten: the media keys can only nudge,
+        so "set volume to 30" used to be impossible and returned an error. When the
+        Core Audio dependency is absent, up/down/mute fall back to the media keys —
+        only exact levels need it.
+
         Args:
-            change: ``"up"``, ``"down"``, ``"mute"``, or a level 0-100.
+            change: ``"up"``, ``"down"``, ``"mute"``, ``"unmute"``, or a level 0-100.
 
         Returns:
             A short confirmation.
 
         Raises:
             CommandNotAllowedError: The requested change is not understood.
+            CommandExecutionError: An exact level was asked for but Core Audio is
+                unavailable to set it.
         """
-        if change == "mute":
-            self._tap_key(_VK_VOLUME_MUTE)
-            _log.info("volume_changed", change="mute")
-            return "Toggled mute."
+        from quainex.core.automation import audio
 
-        if change in {"up", "down"}:
+        if isinstance(change, int):
+            if not 0 <= change <= 100:
+                raise CommandNotAllowedError(f"{change} is outside the range 0-100.")
+            if not audio.is_available():
+                raise CommandExecutionError(
+                    'Setting an exact level needs the audio extra: pip install -e ".[audio]". '
+                    "Say 'volume up' or 'volume down' instead."
+                )
+            audio.set_level(change)
+            return f"Volume set to {change}%."
+
+        if change in {"mute", "unmute"}:
+            if audio.is_available():
+                audio.set_mute(muted=change == "mute")
+            else:
+                # No exact control; the media key toggles, which unmutes if muted.
+                self._tap_key(_VK_VOLUME_MUTE)
+            _log.info("volume_changed", change=change)
+            return "Muted." if change == "mute" else "Unmuted."
+
+        # up / down.
+        if audio.is_available():
+            audio.nudge(_VOLUME_STEP_PERCENT if change == "up" else -_VOLUME_STEP_PERCENT)
+        else:
             key = _VK_VOLUME_UP if change == "up" else _VK_VOLUME_DOWN
             for _ in range(_VOLUME_STEPS):
                 self._tap_key(key)
-            _log.info("volume_changed", change=change)
-            return f"Turned the volume {change}."
-
-        if isinstance(change, int) and 0 <= change <= 100:
-            # Media keys can only nudge; mute then step up to approximate a level.
-            raise CommandNotAllowedError(
-                "Setting an exact volume level is not supported yet; use 'up', 'down' or 'mute'."
-            )
+        _log.info("volume_changed", change=change)
+        return f"Turned the volume {change}."
 
         raise CommandNotAllowedError(f"Cannot interpret '{change}' as a volume change.")
 
@@ -654,6 +833,56 @@ class WindowsDesktopController:
         )
         _log.info("brightness_changed", level=level)
         return f"Set brightness to {level}%."
+
+    def set_keyboard_light(self, *, enabled: bool) -> str:
+        """Turn the keyboard backlight on or off.
+
+        Honest about a hard limit: Windows exposes **no standard API** for the
+        keyboard backlight. It is firmware-specific — some laptops drive it only
+        from an Fn key, others through vendor software (Lenovo Vantage, Dell
+        Command, MyASUS) with no public interface. There is no reliable way to do
+        this from Python that works across machines.
+
+        So this tries the one broadly-available path — the standard WMI keyboard
+        backlight class, present on some machines — and, when that is absent, says
+        so plainly rather than silently doing nothing. A command that claims success
+        while the light does not change would be worse than an honest "not exposed".
+
+        Args:
+            enabled: ``True`` for on, ``False`` for off.
+
+        Returns:
+            A confirmation, when the hardware supports it.
+
+        Raises:
+            CommandExecutionError: This machine's firmware does not expose the
+                backlight to software.
+        """
+        # Level 2 is typically full brightness, 0 off, on the WMI class that exposes
+        # it. Absent on most consumer laptops, which is why the failure message is
+        # the likely outcome and is written to be useful.
+        level = 2 if enabled else 0
+        try:
+            self._run(
+                [
+                    _system_executable("powershell.exe"),
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"(Get-CimInstance -Namespace root/WMI "
+                    f"-ClassName Lenovo_SetKeyboardBacklightStatus)"
+                    f".SetKeyboardBacklightStatus({level})",
+                ],
+                failure="unsupported",
+            )
+        except CommandExecutionError as exc:
+            raise CommandExecutionError(
+                "This laptop does not expose its keyboard backlight to software — "
+                "there is no standard Windows control for it. Use the Fn key with the "
+                "backlight symbol (often Fn+Space or Fn+F5)."
+            ) from exc
+        _log.info("keyboard_light", enabled=enabled)
+        return f"Keyboard light {'on' if enabled else 'off'}."
 
     # --- Utilities -------------------------------------------------------
 
@@ -754,6 +983,157 @@ class WindowsDesktopController:
             return f"Wi-Fi is connected to '{ssid}'."
         return f"Wi-Fi is {state.lower()}."
 
+    # --- Media, windows and processes -----------------------------------
+
+    def media_control(self, action: str) -> str:
+        """Send a media transport command.
+
+        Works with whatever player is running — Spotify, a browser tab, the music
+        app — because these are the OS-level media keys that every player honours,
+        not a Spotify-specific integration. So "pause" pauses whatever is playing.
+
+        Args:
+            action: ``play``, ``pause``, ``next``, ``previous`` or ``stop``.
+
+        Returns:
+            A short confirmation.
+
+        Raises:
+            CommandNotAllowedError: The action is not a media command.
+        """
+        # Play and pause are one toggle key; the reply still says which was meant.
+        keys = {
+            "play": _VK_MEDIA_PLAY_PAUSE,
+            "pause": _VK_MEDIA_PLAY_PAUSE,
+            "next": _VK_MEDIA_NEXT,
+            "previous": _VK_MEDIA_PREV,
+            "stop": _VK_MEDIA_STOP,
+        }
+        key = keys.get(action)
+        if key is None:
+            raise CommandNotAllowedError(
+                f"'{action}' is not a media command; use play, pause, next, previous or stop."
+            )
+        self._tap_key(key)
+        _log.info("media_control", action=action)
+        return {
+            "play": "Playing.",
+            "pause": "Paused.",
+            "next": "Skipped to the next track.",
+            "previous": "Back to the previous track.",
+            "stop": "Stopped.",
+        }[action]
+
+    def control_window(self, action: str, name: str | None) -> str:
+        """Minimise, maximise or restore a window, or minimise everything.
+
+        Args:
+            action: ``minimize``, ``maximize``, ``restore`` or ``minimize_all``.
+            name: A substring of the target window's title. Ignored for
+                ``minimize_all``.
+
+        Returns:
+            A short confirmation.
+
+        Raises:
+            CommandNotAllowedError: The action is unknown.
+            CommandExecutionError: No window matches ``name``.
+        """
+        if action == "minimize_all":
+            # The documented shell way to show the desktop, rather than faking a
+            # Win+D keystroke which the foreground window can swallow.
+            self._minimize_all()
+            _log.info("windows_minimized_all")
+            return "Minimised all windows."
+
+        commands = {
+            "minimize": _SW_MINIMIZE,
+            "maximize": _SW_MAXIMIZE,
+            "restore": _SW_RESTORE,
+        }
+        show = commands.get(action)
+        if show is None:
+            raise CommandNotAllowedError(
+                f"'{action}' is not a window command; use minimize, maximize or restore."
+            )
+
+        target = (name or "").strip()
+        if not target:
+            raise CommandNotAllowedError(f"Which window should I {action}?")
+
+        match = self._find_window(target)
+        if match is None:
+            raise CommandExecutionError(f"No open window matches '{target}'.")
+
+        hwnd, title = match
+        ctypes.windll.user32.ShowWindow(hwnd, show)
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+        _log.info("window_controlled", action=action, title=title)
+        return f"{action.capitalize()}d {title}."
+
+    def list_running_apps(self, limit: int = 15) -> list[str]:
+        """Return the names of visible running applications.
+
+        Filtered to processes that own a visible top-level window, so the answer is
+        "Chrome, Spotify, VS Code" rather than a hundred background services nobody
+        asked about.
+
+        Args:
+            limit: Most names to return.
+
+        Returns:
+            Distinct application titles, most-recently-focused first is not
+            guaranteed; ordering is by discovery.
+        """
+        seen: dict[int, str] = {}
+        for hwnd, title in self._enum_visible_windows():
+            pid = ctypes.c_ulong()
+            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value and pid.value not in seen:
+                try:
+                    seen[pid.value] = psutil.Process(pid.value).name().removesuffix(".exe")
+                except (psutil.Error, OSError):
+                    seen[pid.value] = title[:40]
+        names = list(dict.fromkeys(seen.values()))
+        return names[:limit]
+
+    def kill_process(self, name: str) -> str:
+        """Terminate every process whose name matches.
+
+        Distinct from ``close_application``, which asks a known application to quit
+        gracefully through the allowlist. This is the blunt instrument: it matches
+        any running process by name and terminates it, for "kill chrome" when an
+        app is hung. Still a terminate, not a kill -9, so a well-behaved app can
+        still save on the way down.
+
+        Args:
+            name: Process or application name, with or without ``.exe``.
+
+        Returns:
+            How many processes were signalled.
+
+        Raises:
+            CommandExecutionError: Nothing matched.
+        """
+        needle = name.strip().lower().removesuffix(".exe")
+        if not needle:
+            raise CommandNotAllowedError("Name something to close.")
+
+        signalled = 0
+        for process in psutil.process_iter(["name"]):
+            proc_name = (process.info.get("name") or "").lower().removesuffix(".exe")
+            if needle == proc_name or (len(needle) >= 3 and needle in proc_name):
+                try:
+                    process.terminate()
+                    signalled += 1
+                except (psutil.Error, OSError):
+                    continue
+
+        if signalled == 0:
+            raise CommandExecutionError(f"Nothing matching '{name}' is running.")
+        _log.info("processes_killed", query=needle, count=signalled)
+        return f"Closed {signalled} process{'es' if signalled != 1 else ''} matching '{name}'."
+
     def read_clipboard(self) -> str:
         """Return the clipboard contents.
 
@@ -848,27 +1228,6 @@ class WindowsDesktopController:
         )
 
     # --- internals -------------------------------------------------------
-
-    @staticmethod
-    def _require_application(name: str) -> ApplicationSpec:
-        """Resolve a name to an allowlisted application or refuse.
-
-        Args:
-            name: Friendly application name.
-
-        Returns:
-            The matching ``ApplicationSpec``.
-
-        Raises:
-            CommandNotAllowedError: The name is not in the catalogue.
-        """
-        spec = resolve_application(name)
-        if spec is None:
-            available = ", ".join(known_application_names())
-            raise CommandNotAllowedError(
-                f"'{name}' is not an allowed application. Available: {available}."
-            )
-        return spec
 
     def _search_roots(self) -> list[Path]:
         """Return the directories file search is permitted to traverse.
@@ -1045,6 +1404,61 @@ class WindowsDesktopController:
         user32 = ctypes.windll.user32
         user32.keybd_event(virtual_key, 0, 0, 0)
         user32.keybd_event(virtual_key, 0, _KEYEVENTF_KEYUP, 0)
+
+    @staticmethod
+    def _enum_visible_windows() -> list[tuple[int, str]]:
+        """List visible, titled top-level windows.
+
+        Returns:
+            ``(hwnd, title)`` pairs. Untitled and hidden windows are excluded, so
+            the result is the windows a person would call "open".
+        """
+        user32 = ctypes.windll.user32
+        results: list[tuple[int, str]] = []
+
+        # WINFUNCTYPE, not CFUNCTYPE: the callback is invoked by Windows with the
+        # stdcall convention, and getting that wrong corrupts the stack.
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def callback(hwnd: int, _param: object) -> bool:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = buffer.value.strip()
+            if title:
+                results.append((hwnd, title))
+            return True
+
+        user32.EnumWindows(enum_proc(callback), 0)
+        return results
+
+    def _find_window(self, name: str) -> tuple[int, str] | None:
+        """Find a visible window whose title contains ``name``.
+
+        Args:
+            name: Case-insensitive substring of the window title.
+
+        Returns:
+            The first matching ``(hwnd, title)``, or ``None``.
+        """
+        needle = name.lower()
+        for hwnd, title in self._enum_visible_windows():
+            if needle in title.lower():
+                return hwnd, title
+        return None
+
+    @staticmethod
+    def _minimize_all() -> None:
+        """Minimise every window via the shell 'minimize all' command."""
+        # 419 is MIN_ALL, sent to the shell's tray window. This is the same message
+        # the taskbar's "Show desktop" issues.
+        shell = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+        if shell:
+            ctypes.windll.user32.PostMessageW(shell, 0x0111, 419, 0)
 
     def _netsh_output(self, args: list[str]) -> str:
         """Run a read-only ``netsh`` query and return its text.

@@ -38,7 +38,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, Field
 
 #: Direction or absolute level for volume and brightness adjustments.
-LevelChange = Literal["up", "down", "mute"] | int
+LevelChange = Literal["up", "down", "mute", "unmute"] | int
 
 
 class FileHit(BaseModel):
@@ -133,6 +133,26 @@ class DesktopController(Protocol):
 
     def set_brightness(self, change: LevelChange) -> str:
         """Raise, lower, or set display brightness."""
+        ...
+
+    def set_keyboard_light(self, *, enabled: bool) -> str:
+        """Turn the keyboard backlight on or off, where the firmware allows it."""
+        ...
+
+    def media_control(self, action: str) -> str:
+        """Send a media transport command (play/pause/next/previous/stop)."""
+        ...
+
+    def control_window(self, action: str, name: str | None) -> str:
+        """Minimise, maximise or restore a window, or minimise everything."""
+        ...
+
+    def list_running_apps(self, limit: int = 15) -> list[str]:
+        """List the applications with a visible window."""
+        ...
+
+    def kill_process(self, name: str) -> str:
+        """Force-close every running process matching ``name``."""
         ...
 
     # --- Utilities ---
