@@ -1087,6 +1087,41 @@ input[type="text"].field:focus {
   white-space: nowrap;
 }
 
+/* ---- Phone control status. Wraps rather than truncating: the whole point of
+   this line is that it says what is missing, so it must stay readable. */
+
+.tg-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+}
+
+.tg-status .muted {
+  flex-basis: 100%;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.tg-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.tg-candidates p {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
+}
+
 @media (max-width: 760px) {
   .key-row {
     grid-template-columns: 1fr;

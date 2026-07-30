@@ -26,14 +26,11 @@ Future improvements:
 
 from __future__ import annotations
 
-import asyncio
-
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
 from quainex.api.dependencies import ContainerDep
 from quainex.core.agent import AgentBudget, AgentRun
-from quainex.core.exceptions import ConfigurationError
 from quainex.plugins import DiscoveredPlugin, PluginRequest, PluginResponse
 
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
@@ -178,17 +175,14 @@ async def telegram_start(container: ContainerDep) -> dict[str, object]:
         The bridge state after starting.
 
     Raises:
-        ConfigurationError: No bot token or no allowed users configured.
+        FeatureNotConfiguredError: No bot token or no allowed users configured.
+            503 rather than 500 — the caller can fix this, and the message says how.
     """
-    bridge = container.telegram
-    if not bridge.is_configured:
-        raise ConfigurationError(
-            "Telegram is not configured. Set QUAINEX_TELEGRAM_BOT_TOKEN (from "
-            "@BotFather) and QUAINEX_TELEGRAM_ALLOWED_USERS (from @userinfobot)."
-        )
-    if not bridge.is_running:
-        asyncio.create_task(bridge.run())  # noqa: RUF006 - lifetime owned by the bridge
-    return bridge.status()
+    # Delegated to the container rather than starting a task here: the container
+    # owns the task handle, so shutdown can cancel it. A task created in a request
+    # handler is a task nobody can stop.
+    await container.start_telegram()
+    return container.telegram.status()
 
 
 @telegram_router.post("/stop", summary="Stop polling Telegram")
@@ -201,5 +195,5 @@ async def telegram_stop(container: ContainerDep) -> dict[str, object]:
     Returns:
         The bridge state after stopping.
     """
-    container.telegram.stop()
+    await container.stop_telegram()
     return container.telegram.status()

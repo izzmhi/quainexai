@@ -126,10 +126,22 @@ def test_nothing_is_loaded_from_another_host(html: str):
     This is the promise that justifies having no build step at all, so it is worth
     an assertion rather than a line in a README. A single CDN ``<script>`` would
     make a local application depend on someone else's uptime.
+
+    Only *subresources* count — ``src`` attributes and stylesheet links. An
+    ``<a href>`` to an external site is navigation the user chooses to follow, not
+    something the page fetches, and the settings panel legitimately links out to
+    the pages where API keys are issued. An earlier version of this test conflated
+    the two and failed the moment such a link was added.
     """
-    for attribute in re.findall(r'(?:src|href)="([^"]+)"', html):
-        assert not attribute.startswith(("http://", "https://", "//")), (
-            f"index.html loads {attribute} from another host; the dashboard must be self-contained."
+    subresources = [
+        *re.findall(r'\ssrc="([^"]+)"', html),
+        *re.findall(r'<link[^>]+href="([^"]+)"', html),
+    ]
+
+    assert subresources, "expected the document to load at least a stylesheet"
+    for url in subresources:
+        assert not url.startswith(("http://", "https://", "//")), (
+            f"index.html loads {url} from another host; the dashboard must be self-contained."
         )
 
 

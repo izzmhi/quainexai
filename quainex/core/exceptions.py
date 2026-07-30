@@ -67,6 +67,24 @@ class ConfigurationError(QuainexError):
     http_status = HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+class FeatureNotConfiguredError(QuainexError):
+    """An optional feature was used before it was set up.
+
+    Distinct from ``ConfigurationError``, which is 500 because it means the
+    configuration is *wrong* — a bug or a broken deployment, and the process
+    should not have started. This one means the configuration is merely
+    *incomplete*: the caller asked for something that has not been switched on
+    yet, and can fix it themselves.
+
+    503 rather than 500 for that reason. Reporting "you have not set up Telegram"
+    as an internal server error sends the user to read a traceback instead of the
+    message, which is where the instructions are.
+    """
+
+    error_code = "feature_not_configured"
+    http_status = HTTPStatus.SERVICE_UNAVAILABLE
+
+
 class InvalidUtteranceError(QuainexError):
     """The user's input cannot be interpreted as a request.
 

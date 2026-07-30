@@ -733,6 +733,177 @@ async function loadSettings() {
   } catch (error) {
     toast(error.message, "bad");
   }
+  await loadTelegram();
+}
+
+/* ------------------------------------------------------- phone control */
+
+/** Load and render the Telegram setup card. */
+async function loadTelegram() {
+  try {
+    renderTelegram(await api("/settings/telegram"));
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+}
+
+/**
+ * Render the phone-control status.
+ *
+ * @param {object} state The `/settings/telegram` payload.
+ */
+function renderTelegram(state) {
+  const input = bind("telegramUsers");
+  // Only populated when empty, so a half-typed list is never overwritten by a
+  // background refresh.
+  if (input && !input.value) input.value = state.allowed_users.join(", ");
+
+  const host = bind("telegramStatus");
+  if (!host) return;
+
+  // The status says *why* it is off, not just that it is. "Not configured" with
+  // no explanation is the reason this feature went unused.
+  const [tag, text] = state.running
+    ? ["tag--ok", "Polling. Message your bot from your phone."]
+    : state.configured
+      ? ["tag--warn", "Ready, but not polling. Press Start."]
+      : ["tag--bad", `Off — still needs ${state.missing.join(" and ")}.`];
+
+  host.replaceChildren(
+    el("span", { class: `tag ${tag}`, text: state.running ? "live" : "off" }),
+    el("span", { text }),
+    el("span", {
+      class: "muted",
+      text: `Token ${state.token_configured ? "saved" : "missing"} · ${state.allowed_users.length} allowed account(s) · blocks ${state.blocked_intents.join(", ")}`,
+    }),
+  );
+}
+
+/** Save the allowlist, replacing whatever was there. */
+async function saveTelegramUsers() {
+  const input = bind("telegramUsers");
+  if (!input) return;
+
+  // Tolerant of commas, spaces and newlines: this is typed by hand, and being
+  // strict about separators would only produce a puzzle.
+  const ids = input.value
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .map(Number);
+
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+    toast("Telegram user ids are positive whole numbers.", "bad");
+    return;
+  }
+
+  try {
+    const state = await api("/settings/telegram/allowed-users", {
+      method: "PUT",
+      body: { user_ids: ids },
+    });
+    renderTelegram(state);
+    toast(
+      ids.length
+        ? `${ids.length} account(s) allowed. ${state.configured ? "Press Start to begin polling." : ""}`
+        : "Allowlist cleared — phone control is off.",
+      "good",
+    );
+  } catch (error) {
+    toast(error.message, "bad");
+  }
+}
+
+/**
+ * Check the token with Telegram and offer any user ids it can see.
+ *
+ * Removes the one genuinely awkward step in setup — finding your numeric id via
+ * a third-party bot and typing it correctly.
+ */
+async function testTelegram() {
+  toast("Asking Telegram about this bot…");
+  let result;
+  try {
+    result = await api("/settings/telegram/test", { method: "POST" });
+  } catch (error) {
+    toast(error.message, "bad");
+    return;
+  }
+
+  if (!result.ok) {
+    toast(result.error ?? "Telegram did not accept the token.", "bad");
+    return;
+  }
+
+  toast(`Token works — the bot is @${result.username}.`, "good");
+
+  const host = bind("telegramCandidates");
+  if (!host) return;
+
+  const candidates = result.candidates ?? [];
+  if (candidates.length === 0) {
+    host.hidden = false;
+    host.replaceChildren(
+      el("p", {
+        class: "muted",
+        text: `Send any message to @${result.username} from your phone, then press "Check bot" again — your account will appear here.`,
+      }),
+    );
+    return;
+  }
+
+  host.hidden = false;
+  host.replaceChildren(
+    el("p", {
+      class: "muted",
+      text: "Accounts that have messaged this bot. Only add one you recognise — messaging the bot does not grant access, you do.",
+    }),
+    ...candidates.map((candidate) => {
+      const label = [candidate.name, candidate.username && `@${candidate.username}`]
+        .filter(Boolean)
+        .join(" ");
+      const button = el("button", {
+        class: "chip",
+        type: "button",
+        title: "Add this id to the allowlist field",
+      });
+      button.append(
+        el("strong", { text: String(candidate.user_id) }),
+        el("span", { text: label || "no display name" }),
+      );
+      // Fills the field rather than saving: adding an account to the list that
+      // controls this machine stays a deliberate act, not one click.
+      button.addEventListener("click", () => {
+        const input = bind("telegramUsers");
+        if (!input) return;
+        const existing = input.value
+          .split(/[\s,]+/)
+          .filter(Boolean)
+          .map(String);
+        if (!existing.includes(String(candidate.user_id))) {
+          existing.push(String(candidate.user_id));
+        }
+        input.value = existing.join(", ");
+        input.focus();
+        toast("Added to the field. Press Save to apply it.");
+      });
+      return button;
+    }),
+  );
+}
+
+/**
+ * Start or stop polling.
+ *
+ * @param {"start"|"stop"} action Which to do.
+ */
+async function toggleTelegram(action) {
+  try {
+    await api(`/telegram/${action}`, { method: "POST" });
+    await loadTelegram();
+    toast(action === "start" ? "Polling Telegram." : "Stopped polling.", "good");
+  } catch (error) {
+    toast(error.message, "bad");
+  }
 }
 
 /**
@@ -1020,6 +1191,16 @@ function boot() {
     .querySelector('[data-action="clear-conversation"]')
     ?.addEventListener("click", clearConversation);
   document.querySelector('[data-action="test-providers"]')?.addEventListener("click", testProviders);
+  document
+    .querySelector('[data-action="telegram-save"]')
+    ?.addEventListener("click", saveTelegramUsers);
+  document.querySelector('[data-action="telegram-test"]')?.addEventListener("click", testTelegram);
+  document
+    .querySelector('[data-action="telegram-start"]')
+    ?.addEventListener("click", () => toggleTelegram("start"));
+  document
+    .querySelector('[data-action="telegram-stop"]')
+    ?.addEventListener("click", () => toggleTelegram("stop"));
   document.querySelector('[data-action="confirm-cancel"]')?.addEventListener("click", () => {
     closeConfirm();
     addTurn({ role: "assistant", text: "Cancelled. Nothing was done.", meta: "cancelled" });

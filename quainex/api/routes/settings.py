@@ -56,6 +56,7 @@ from pydantic import BaseModel, Field
 
 from quainex.api.dependencies import ContainerDep
 from quainex.core.exceptions import ProviderError
+from quainex.integrations.telegram import TELEGRAM_BLOCKED_INTENTS
 from quainex.security.vault import STORABLE_SECRETS, CredentialVault
 from quainex.services.ai.provider import ChatMessage
 
@@ -257,6 +258,23 @@ def _snapshot(container: Container) -> SettingsResponse:
     )
 
 
+async def _apply_stored_credential(container: Container, name: str) -> None:
+    """Make a just-changed credential take effect.
+
+    Which subsystem to rebuild depends on the credential, and getting this wrong
+    is invisible: the save returns 200 and nothing happens. The Telegram token had
+    exactly that bug — it reloaded the AI provider chain, which does not hold it.
+
+    Args:
+        container: The application container.
+        name: The credential that changed.
+    """
+    if name == "telegram_bot_token":
+        await container.reload_telegram()
+    else:
+        await container.reload_ai_providers()
+
+
 @router.get("/providers", response_model=SettingsResponse, summary="Read provider configuration")
 async def read_providers(container: ContainerDep) -> SettingsResponse:
     """Report which credentials are set and how the chain is ordered.
@@ -295,7 +313,7 @@ async def store_credential(
     """
     vault = CredentialVault(container.base_settings.credentials_path)
     vault.set(name, payload.value)
-    await container.reload_ai_providers()
+    await _apply_stored_credential(container, name)
     return _snapshot(container)
 
 
@@ -324,8 +342,152 @@ async def clear_credential(name: str, container: ContainerDep) -> SettingsRespon
     """
     vault = CredentialVault(container.base_settings.credentials_path)
     vault.delete(name)
-    await container.reload_ai_providers()
+    await _apply_stored_credential(container, name)
     return _snapshot(container)
+
+
+class TelegramState(BaseModel):
+    """Everything the dashboard needs to finish, verify or stop phone control.
+
+    Attributes:
+        token_configured: Whether a bot token is set. The token itself is never
+            returned.
+        allowed_users: The user ids permitted to drive this machine. Returned in
+            full, unlike the token — an authorisation list you cannot inspect is
+            not one you can trust.
+        configured: Whether both halves are present. Polling is refused otherwise.
+        running: Whether the bridge is currently polling.
+        blocked_intents: Commands the bridge refuses regardless of who asks.
+        missing: What is still needed, in plain words. Present so the dashboard
+            never has to show "not configured" without saying why.
+    """
+
+    token_configured: bool
+    allowed_users: list[int]
+    configured: bool
+    running: bool
+    blocked_intents: list[str]
+    missing: list[str]
+
+
+class TelegramAllowlist(BaseModel):
+    """The set of Telegram accounts permitted to control this machine.
+
+    Attributes:
+        user_ids: Numeric Telegram user ids. An empty list clears the allowlist,
+            which disables the bridge — the honest way to turn phone control off
+            without deleting the bot.
+    """
+
+    # Bounded: this is a personal machine, and a list of a thousand ids is a
+    # configuration mistake rather than a use case.
+    user_ids: list[int] = Field(default_factory=list, max_length=32)
+
+
+def _telegram_state(container: Container) -> TelegramState:
+    """Build the phone-control status view.
+
+    Args:
+        container: The application container.
+
+    Returns:
+        Current state, including what is still missing.
+    """
+    bridge = container.telegram
+    settings = container.settings
+    allowed = list(settings.telegram_allowed_users)
+    has_token = bool(settings.telegram_bot_token)
+
+    missing: list[str] = []
+    if not has_token:
+        missing.append("a bot token from @BotFather")
+    if not allowed:
+        missing.append("at least one user id from @userinfobot")
+
+    return TelegramState(
+        token_configured=has_token,
+        allowed_users=allowed,
+        configured=bridge.is_configured,
+        running=bridge.is_running,
+        # Read from the constant rather than out of `bridge.status()`, whose values
+        # are typed `object` — the type would have to be asserted away, and the
+        # constant is the actual source of truth.
+        blocked_intents=sorted(intent.value for intent in TELEGRAM_BLOCKED_INTENTS),
+        missing=missing,
+    )
+
+
+@router.get("/telegram", response_model=TelegramState, summary="Read phone-control setup")
+async def read_telegram(container: ContainerDep) -> TelegramState:
+    """Report whether phone control is set up, and what is missing if not.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        The current state.
+    """
+    return _telegram_state(container)
+
+
+@router.post(
+    "/telegram/test",
+    summary="Check the bot token and find your Telegram user id",
+)
+async def test_telegram(container: ContainerDep) -> dict[str, object]:
+    """Verify the token with Telegram and list anyone who has messaged the bot.
+
+    Returns 200 with ``ok: false`` on failure rather than an error status, for the
+    same reason as the provider test: "your token is wrong" and "Telegram is
+    unreachable" need different responses from the user, and an error envelope
+    flattens them into one red box.
+
+    The candidate list is **not** an allowlist. Nothing is authorised until a
+    human picks from it — auto-allowing whoever messaged first would let a
+    stranger who found the bot grant themselves control of the machine.
+
+    Args:
+        container: Injected application container.
+
+    Returns:
+        Whether the token works, the bot's username, and candidate user ids.
+    """
+    return await container.telegram.diagnose()
+
+
+@router.put(
+    "/telegram/allowed-users",
+    response_model=TelegramState,
+    summary="Set who may control this machine from Telegram",
+)
+async def set_telegram_allowlist(
+    payload: TelegramAllowlist, container: ContainerDep
+) -> TelegramState:
+    """Replace the Telegram allowlist and rebuild the bridge.
+
+    Replaces rather than appends, deliberately: revoking access must be one
+    request, not a delete endpoint someone forgets to call. The bridge is rebuilt
+    immediately, so a removed id stops being obeyed now rather than at the next
+    restart — for an authorisation list, "eventually" is not good enough.
+
+    Args:
+        payload: The ids to permit. An empty list disables the bridge.
+        container: Injected application container.
+
+    Returns:
+        The state after the change.
+
+    Raises:
+        VaultUnavailableError: This platform cannot store the list.
+    """
+    vault = CredentialVault(container.base_settings.credentials_path)
+    if payload.user_ids:
+        vault.set("telegram_allowed_users", ",".join(str(uid) for uid in payload.user_ids))
+    else:
+        vault.delete("telegram_allowed_users")
+
+    await container.reload_telegram()
+    return _telegram_state(container)
 
 
 @router.post(

@@ -257,6 +257,129 @@ def test_a_pasted_document_is_rejected_rather_than_stored(client: TestClient):
     assert response.status_code == 422
 
 
+# -- phone control ---------------------------------------------------------
+
+
+def test_phone_control_says_what_is_missing_not_just_that_it_is_off(client: TestClient):
+    """The reason this feature went unused.
+
+    A token was storable from the dashboard but the allowlist was not, so the
+    status read "not configured" forever with no way to finish and no explanation.
+    """
+    body = client.get("/settings/telegram").json()
+
+    assert body["configured"] is False
+    assert body["running"] is False
+    assert body["allowed_users"] == []
+    assert any("@BotFather" in item for item in body["missing"])
+    assert any("@userinfobot" in item for item in body["missing"])
+
+
+def test_the_allowlist_is_readable_unlike_the_token(client: TestClient):
+    """An authorisation list you cannot inspect is not one you can trust.
+
+    "Which accounts can drive my computer?" has to be answerable, which is why
+    this value is returned in full while the token never is.
+    """
+    body = client.get("/settings/telegram").json()
+
+    assert "allowed_users" in body
+    assert body["token_configured"] is False
+    # There is no field carrying the token itself, under any name.
+    assert "token" not in body
+    assert "bot_token" not in body
+
+
+@windows_only
+def test_setting_the_allowlist_completes_the_configuration(client: TestClient, settings: Settings):
+    with_token = settings.model_copy(
+        update={"telegram_bot_token": SecretStr("123456:fake-bot-token-for-tests")}
+    )
+
+    with TestClient(create_app(with_token)) as scoped:
+        before = scoped.get("/settings/telegram").json()
+        assert before["configured"] is False
+
+        after = scoped.put(
+            "/settings/telegram/allowed-users", json={"user_ids": [111222333]}
+        ).json()
+
+        assert after["allowed_users"] == [111222333]
+        assert after["configured"] is True
+        # Still not polling: configuring is not the same as switching on, and
+        # starting a network loop as a side effect of saving a setting would be
+        # the wrong default for something that accepts remote commands.
+        assert after["running"] is False
+
+
+@windows_only
+def test_saving_replaces_the_allowlist_rather_than_appending(client: TestClient):
+    """Revoking access must be one request, not a delete endpoint to remember."""
+    client.put("/settings/telegram/allowed-users", json={"user_ids": [111, 222]})
+
+    after = client.put("/settings/telegram/allowed-users", json={"user_ids": [222]}).json()
+
+    assert after["allowed_users"] == [222]
+
+
+@windows_only
+def test_clearing_the_allowlist_disables_phone_control(client: TestClient, settings: Settings):
+    """The honest way to switch it off without deleting the bot."""
+    with_token = settings.model_copy(
+        update={"telegram_bot_token": SecretStr("123456:fake-bot-token-for-tests")}
+    )
+
+    with TestClient(create_app(with_token)) as scoped:
+        scoped.put("/settings/telegram/allowed-users", json={"user_ids": [111]})
+
+        after = scoped.put("/settings/telegram/allowed-users", json={"user_ids": []}).json()
+
+        assert after["allowed_users"] == []
+        assert after["configured"] is False
+
+
+@windows_only
+def test_the_allowlist_survives_a_restart(client: TestClient, settings: Settings):
+    """It is stored, not held in memory — otherwise setup is lost on every reboot."""
+    client.put("/settings/telegram/allowed-users", json={"user_ids": [444555666]})
+
+    with TestClient(create_app(settings)) as restarted:
+        assert restarted.get("/settings/telegram").json()["allowed_users"] == [444555666]
+
+
+def test_an_oversized_allowlist_is_rejected(client: TestClient):
+    """A personal machine with a thousand authorised accounts is a mistake."""
+    response = client.put(
+        "/settings/telegram/allowed-users", json={"user_ids": list(range(1, 200))}
+    )
+
+    assert response.status_code == 422
+
+
+def test_starting_without_configuration_explains_the_refusal(client: TestClient):
+    """And says *why* the allowlist is mandatory, not just that it is."""
+    response = client.post("/telegram/start")
+
+    # 503, not 500: incomplete setup is the caller's to fix, and reporting it as
+    # an internal server error sends them to read a traceback instead of the
+    # message that contains the instructions.
+    assert response.status_code == 503
+    detail = response.text
+    assert "@BotFather" in detail
+    assert "@userinfobot" in detail
+    # The reasoning, not only the requirement.
+    assert "anyone who found it" in detail
+
+
+def test_the_bridge_reports_the_commands_it_refuses_outright(client: TestClient):
+    """Screen and clipboard access stay off the phone regardless of who asks."""
+    blocked = client.get("/settings/telegram").json()["blocked_intents"]
+
+    assert "screenshot" in blocked
+    assert "clipboard" in blocked
+    assert "look_at_screen" in blocked
+
+
 # -- testing the chain -----------------------------------------------------
 
 

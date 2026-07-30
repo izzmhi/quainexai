@@ -57,7 +57,7 @@ from quainex.core.brain import Brain
 from quainex.core.commands import CommandExecutor, build_executor
 from quainex.core.conversation import Conversationalist
 from quainex.core.devtools import CodeAssistant, DevRunner
-from quainex.core.exceptions import ConfigurationError
+from quainex.core.exceptions import ConfigurationError, FeatureNotConfiguredError
 from quainex.core.logging import configure_logging, get_logger
 from quainex.core.memory import MemoryManager, SqlAlchemyMemoryStore
 from quainex.core.speech import WindowsSapiTTS
@@ -66,6 +66,7 @@ from quainex.database.engine import Database
 from quainex.integrations import TelegramBridge
 from quainex.plugins import PluginRegistry
 from quainex.security import ConfirmationService, CredentialVault, RateLimiter
+from quainex.security.vault import STORABLE_SECRETS
 from quainex.services.ai.anthropic_provider import AnthropicProvider
 from quainex.services.ai.fallback import FallbackProvider
 from quainex.services.ai.gemini_provider import GeminiProvider
@@ -77,6 +78,37 @@ if TYPE_CHECKING:
 
     from quainex.core.automation import DesktopController
     from quainex.services.ai.provider import AIProvider
+
+
+#: Module logger, for the helpers below that run outside a Container instance.
+_log = get_logger(__name__)
+
+
+def _parse_user_ids(raw: str) -> list[int]:
+    """Parse a stored Telegram allowlist into user ids.
+
+    Tolerant of the separators people actually type — commas, spaces, newlines —
+    because this is entered by hand in the dashboard. Anything that is not an
+    integer is dropped rather than raising: a malformed entry must not stop the
+    application from booting, and the dashboard reads the list back so a missing
+    id is visible.
+
+    Args:
+        raw: The stored value, e.g. ``"123456789, 987654321"``.
+
+    Returns:
+        The ids, in order, without duplicates.
+    """
+    ids: list[int] = []
+    for token in raw.replace(",", " ").replace("\n", " ").split():
+        try:
+            parsed = int(token)
+        except ValueError:
+            _log.warning("telegram_allowlist_entry_ignored", entry=token[:32])
+            continue
+        if parsed not in ids:
+            ids.append(parsed)
+    return ids
 
 
 def _secret(value: SecretStr | None) -> str | None:
@@ -333,13 +365,19 @@ class Container:
         # startup invariants — including the one that refuses to boot exposed
         # without credentials — against a half-built object.
         #
-        # Values are wrapped in `SecretStr` rather than passed as plain strings.
+        # Secrets are wrapped in `SecretStr` rather than passed as plain strings.
         # `model_copy` does not coerce, so an unwrapped string would sit in a field
         # typed `SecretStr | None` and break every reader of it, including the
-        # `has_ai_credentials` computed field.
-        return settings.model_copy(
-            update={name: SecretStr(value) for name, value in stored.items()}
-        )
+        # `has_ai_credentials` computed field. The same absence of coercion is why
+        # the Telegram allowlist is parsed to `list[int]` here rather than left as
+        # the string the vault stores.
+        update: dict[str, object] = {
+            name: SecretStr(value) for name, value in stored.items() if name in STORABLE_SECRETS
+        }
+        if raw := stored.get("telegram_allowed_users"):
+            update["telegram_allowed_users"] = _parse_user_ids(raw)
+
+        return settings.model_copy(update=update)
 
     async def reload_ai_providers(self) -> None:
         """Rebuild the AI provider chain from the vault, without a restart.
@@ -366,6 +404,72 @@ class Container:
             self.ai_provider = chain
 
         self.logger.info("ai_providers_reloaded", chain=self.ai_provider.name)
+
+    async def reload_telegram(self) -> None:
+        """Rebuild the Telegram bridge from the vault, without a restart.
+
+        Called after the dashboard changes the bot token or the allowlist. Unlike
+        the provider chain, the bridge cannot be swapped in place: it holds the
+        settings it was built with, and it may be sitting in a long-poll. So it is
+        stopped, replaced, and restarted only if it was running — which also means
+        a user removed from the allowlist stops being obeyed immediately, rather
+        than at the next process restart. For an authorisation list, "eventually"
+        is not good enough.
+
+        Raises:
+            ConfigurationError: A configured provider name has no implementation.
+        """
+        vault = CredentialVault(self.base_settings.credentials_path)
+        refreshed = self._apply_vault(self.base_settings, vault)
+
+        was_running = self.telegram.is_running
+        await self.stop_telegram()
+
+        self.settings = refreshed
+        self.telegram = TelegramBridge(
+            refreshed,
+            brain=self.brain,
+            commands=self.commands,
+            voice=self.voice,
+            memory=self.memory,
+        )
+
+        if was_running and self.telegram.is_configured:
+            self._telegram_task = asyncio.create_task(self.telegram.run())
+
+        self.logger.info(
+            "telegram_reloaded",
+            configured=self.telegram.is_configured,
+            running=self.telegram.is_running,
+            allowed_users=len(refreshed.telegram_allowed_users),
+        )
+
+    async def start_telegram(self) -> None:
+        """Begin polling, replacing any existing polling task.
+
+        Raises:
+            FeatureNotConfiguredError: The bridge is not configured.
+        """
+        if not self.telegram.is_configured:
+            raise FeatureNotConfiguredError(
+                "Telegram is not configured. It needs both a bot token from "
+                "@BotFather and at least one allowed user id from @userinfobot — "
+                "a bot with an empty allowlist would take orders from anyone who "
+                "found it, so Quainex refuses to poll without one."
+            )
+        if self.telegram.is_running:
+            return
+
+        self._telegram_task = asyncio.create_task(self.telegram.run())
+
+    async def stop_telegram(self) -> None:
+        """Stop polling and await the task, so nothing is left half-cancelled."""
+        self.telegram.stop()
+        if self._telegram_task is not None:
+            self._telegram_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._telegram_task
+            self._telegram_task = None
 
     @staticmethod
     def _build_ai_provider(settings: Settings) -> AIProvider:
@@ -445,13 +549,7 @@ class Container:
 
         Called from the application's shutdown hook. Safe to call more than once.
         """
-        self.telegram.stop()
-        if self._telegram_task is not None:
-            self._telegram_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._telegram_task
-            self._telegram_task = None
-
+        await self.stop_telegram()
         await self.ai_provider.aclose()
         await self.database.aclose()
         self.logger.info("container_closed")

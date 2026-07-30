@@ -73,6 +73,46 @@ def test_bridge_is_off_without_an_allowlist(tmp_path):
     assert bridge.is_configured is False
 
 
+# -- setup diagnostics -----------------------------------------------------
+
+
+async def test_diagnose_says_so_when_there_is_no_token(tmp_path):
+    """A diagnostic must not need the network to report the obvious."""
+    result = await _bridge(tmp_path).diagnose()
+
+    assert result["ok"] is False
+    assert "No bot token" in str(result["error"])
+    assert result["candidates"] == []
+
+
+def test_senders_are_deduplicated_and_named_for_recognition_only():
+    """The id authorises; the name only helps a human recognise it.
+
+    A display name is chosen by its owner and can be anything, including a copy
+    of someone else's — which is precisely why it is not what grants access.
+    """
+    from quainex.integrations.telegram import _senders
+
+    candidates = _senders(
+        [
+            {"message": {"from": {"id": 111, "first_name": "Sam", "username": "sam"}}},
+            # Same person again: one entry, not two.
+            {"message": {"from": {"id": 111, "first_name": "Sam"}}},
+            {"callback_query": {"from": {"id": 222, "first_name": "Alex", "last_name": "Lee"}}},
+            {"edited_message": {"from": {"id": 333}}},
+            # Malformed and anonymous updates must not produce entries.
+            {"message": {}},
+            {"channel_post": {"text": "hi"}},
+            {"message": {"from": {"id": "not-an-int"}}},
+        ]
+    )
+
+    assert [entry["user_id"] for entry in candidates] == [111, 222, 333]
+    assert candidates[0]["username"] == "sam"
+    assert candidates[1]["name"] == "Alex Lee"
+    assert candidates[2]["name"] == ""
+
+
 def test_bridge_is_configured_with_both(tmp_path):
     bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
     assert bridge.is_configured is True

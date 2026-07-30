@@ -83,6 +83,9 @@ _ENTROPY = b"quainex.credential.vault.v1"
 
 #: Secret names the vault will store. An allowlist, so a caller cannot use the
 #: vault as a general-purpose key/value store reachable over HTTP.
+#:
+#: Values under these names are **never returned** by any endpoint. They can be
+#: replaced, never read.
 STORABLE_SECRETS: frozenset[str] = frozenset(
     {
         "groq_api_key",
@@ -93,6 +96,20 @@ STORABLE_SECRETS: frozenset[str] = frozenset(
         "telegram_bot_token",
     }
 )
+
+#: Names the vault will store that are **not** secrets, and are read back.
+#:
+#: The Telegram allowlist is here rather than above because it must be visible:
+#: it is the authorisation list for remote control of this machine, and a
+#: security control you cannot inspect is not one you can trust. "Which accounts
+#: can drive my computer?" has to be an answerable question.
+#:
+#: It lives in the encrypted store anyway — one place for configuration the
+#: dashboard writes, rather than two — and encrypting it costs nothing.
+STORABLE_SETTINGS: frozenset[str] = frozenset({"telegram_allowed_users"})
+
+#: Every name the vault accepts.
+STORABLE: frozenset[str] = STORABLE_SECRETS | STORABLE_SETTINGS
 
 
 class VaultError(QuainexError):
@@ -139,8 +156,7 @@ class UnknownSecretError(VaultError):
             name: The rejected secret name.
         """
         super().__init__(
-            f"'{name}' is not a storable credential. Permitted: "
-            f"{', '.join(sorted(STORABLE_SECRETS))}."
+            f"'{name}' is not a storable credential. Permitted: {', '.join(sorted(STORABLE))}."
         )
 
 
@@ -368,7 +384,7 @@ class CredentialVault:
         return {
             str(name): str(value)
             for name, value in loaded.items()
-            if name in STORABLE_SECRETS and isinstance(value, str)
+            if name in STORABLE and isinstance(value, str)
         }
 
     def get(self, name: str) -> str | None:
@@ -453,7 +469,7 @@ class CredentialVault:
         Raises:
             UnknownSecretError: ``name`` is not storable.
         """
-        if name not in STORABLE_SECRETS:
+        if name not in STORABLE:
             raise UnknownSecretError(name)
 
     def _write(self, secrets: dict[str, str]) -> None:

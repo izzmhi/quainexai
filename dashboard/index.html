@@ -175,6 +175,56 @@
 
       <div class="keys" data-bind="keys"></div>
 
+      <!-- ===================== PHONE CONTROL ===================== -->
+      <div class="panel-head panel-head--tight">
+        <h2>Phone control</h2>
+        <p>
+          Quainex polls Telegram outwards, so nothing on this machine is exposed
+          to the internet — no port forwarded, no certificate needed. It needs
+          two things: a bot token, and the list of accounts allowed to use it.
+          A bot with an empty allowlist would take orders from anyone who found
+          it, so Quainex refuses to poll without one.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="tg-status" data-bind="telegramStatus"></div>
+
+        <div class="key-row">
+          <div class="key-label">
+            <b>Allowed accounts</b>
+            <span>
+              Numeric Telegram user ids, comma separated. Message
+              <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer noopener">@userinfobot</a>
+              to get yours. Saving replaces the whole list, so removing an id
+              revokes it immediately.
+            </span>
+          </div>
+          <div class="key-input">
+            <input
+              type="text"
+              data-bind="telegramUsers"
+              placeholder="123456789, 987654321"
+              inputmode="numeric"
+              aria-label="Allowed Telegram user ids"
+            />
+            <button class="primary" data-action="telegram-save">Save</button>
+          </div>
+          <div class="key-state">
+            <button class="ghost" data-action="telegram-test">Check bot</button>
+            <button class="ghost" data-action="telegram-start">Start polling</button>
+            <button class="danger-ghost" data-action="telegram-stop">Stop</button>
+          </div>
+        </div>
+
+        <!--
+          Candidates found from messages already sent to the bot. Shown so you do
+          not have to hunt for your numeric id — but never auto-allowed: whoever
+          messaged first is not necessarily you.
+        -->
+        <div class="tg-candidates" data-bind="telegramCandidates" hidden></div>
+      </div>
+
       <div class="panel-head panel-head--tight">
         <h2>System</h2>
       </div>

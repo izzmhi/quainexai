@@ -207,6 +207,60 @@ class TelegramBridge:
         """Ask the polling loop to finish."""
         self._running = False
 
+    async def diagnose(self) -> dict[str, object]:
+        """Check the token against Telegram and report who has messaged the bot.
+
+        Two questions this answers that ``status()`` cannot, because both need a
+        network call: *is this token real*, and *what is my user id*.
+
+        The second exists to remove a genuine dead end. Setup otherwise requires
+        finding your numeric id via a third-party bot and typing it in correctly —
+        friction that is enough to make people conclude the feature is broken.
+        Anyone who has messaged the bot appears here as a **candidate**.
+
+        Candidates are reported, never trusted. Auto-allowing whoever messaged
+        first would mean a stranger who found the bot before you could grant
+        themselves control of your machine. The list is shown so a human picks
+        from it; nothing is authorised until they do.
+
+        Reads with ``offset=-1`` and does not advance the offset, so a pending
+        message is still delivered normally once polling starts.
+
+        Returns:
+            ``ok``, the bot's ``username``, ``candidates``, and ``error`` on
+            failure. Never raises: this is a diagnostic, and an exception here
+            would tell the user less than a message does.
+        """
+        if not self._settings.telegram_bot_token:
+            return {"ok": False, "error": "No bot token is configured.", "candidates": []}
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                me = await client.get(f"{self._url()}/getMe")
+                if me.status_code == 401:
+                    return {
+                        "ok": False,
+                        "error": (
+                            "Telegram rejected this bot token. Check it against the "
+                            "one @BotFather gave you, or use /revoke to issue a new one."
+                        ),
+                        "candidates": [],
+                    }
+                me.raise_for_status()
+                username = str((me.json().get("result") or {}).get("username") or "")
+
+                # `offset=-1` returns only the most recent update and leaves the
+                # queue intact, so this diagnostic cannot swallow a real message.
+                updates = await client.get(
+                    f"{self._url()}/getUpdates", params={"offset": -1, "timeout": 0}
+                )
+                candidates = _senders(updates.json().get("result", []))
+        except httpx.HTTPError as exc:
+            return {"ok": False, "error": f"Could not reach Telegram: {exc}", "candidates": []}
+
+        _log.info("telegram_diagnosed", username=username, candidates=len(candidates))
+        return {"ok": True, "username": username, "candidates": candidates}
+
     # -- polling ----------------------------------------------------------
 
     async def _poll(self, client: httpx.AsyncClient) -> list[TelegramUpdate]:
@@ -462,6 +516,40 @@ def _truncate(text: str) -> str:
     if len(text) <= _MAX_MESSAGE_CHARS:
         return text
     return text[:_MAX_MESSAGE_CHARS] + "\n\n…(truncated)"
+
+
+def _senders(raw_updates: list[dict[str, Any]]) -> list[dict[str, object]]:
+    """Extract who sent each pending update, for the setup screen.
+
+    Args:
+        raw_updates: Updates as Telegram sent them.
+
+    Returns:
+        One entry per distinct sender: ``user_id``, ``name`` and ``username``.
+        The name is for recognition only — the id is what authorises, and a
+        display name is chosen by its owner and can be anything at all.
+    """
+    seen: dict[int, dict[str, object]] = {}
+    for raw in raw_updates:
+        sender = (
+            (raw.get("callback_query") or {}).get("from")
+            or (raw.get("message") or {}).get("from")
+            or (raw.get("edited_message") or {}).get("from")
+            or {}
+        )
+        user_id = sender.get("id")
+        if not isinstance(user_id, int) or user_id in seen:
+            continue
+        seen[user_id] = {
+            "user_id": user_id,
+            "name": " ".join(
+                part
+                for part in (sender.get("first_name"), sender.get("last_name"))
+                if isinstance(part, str)
+            ).strip(),
+            "username": str(sender.get("username") or ""),
+        }
+    return list(seen.values())
 
 
 def _parse_update(raw: dict[str, Any]) -> TelegramUpdate:
