@@ -295,6 +295,17 @@ class Settings(BaseSettings):
     # because nobody should discover this behaviour by surprise.
     telegram_send_screenshots: bool = False
 
+    # Upload the file when "send me <file>" is used from Telegram.
+    #
+    # On by default, unlike screenshots, because the disclosure here is *explicit
+    # and per-request*: you name the exact file each time, rather than capturing
+    # ambient content you did not enumerate. The file still travels through
+    # Telegram's servers and stays in the chat, so set this false to disable it —
+    # but the safety that matters is structural and always on: retrieval is
+    # confined to ``command_search_roots`` and size-limited, so it can never become
+    # "send me any file on the disk".
+    telegram_send_files: bool = True
+
     # --- Plugins (Phase 9) ------------------------------------------------
     # Where plugins are looked for. Relative paths resolve to the repo root.
     plugin_dir: Path = Path("plugins_installed")

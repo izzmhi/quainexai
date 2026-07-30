@@ -343,6 +343,59 @@ def test_a_plain_search_is_still_a_file_search():
     assert result.intent is IntentType.SEARCH_FILES
 
 
+# -- folders and files -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "said",
+    ["open desktop", "open downloads", "open documents", "open my pictures folder", "go to music"],
+)
+def test_known_folders_open_locally(said: str):
+    """The classification is free; the controller resolves the real path.
+
+    A folder word goes through the known-folder API, so OneDrive redirection is
+    handled downstream — but deciding it is a folder costs no tokens.
+    """
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.OPEN_FOLDER
+
+
+@pytest.mark.parametrize(
+    ("said", "name"),
+    [
+        ("create a folder called projects", "projects"),
+        ("make a new folder reports", "reports"),
+        ("create tax folder", "tax"),
+        ("make a folder named invoices", "invoices"),
+    ],
+)
+def test_create_folder_is_local(said: str, name: str):
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.CREATE_FOLDER
+    assert result.target == name
+
+
+@pytest.mark.parametrize(
+    ("said", "target"),
+    [
+        ("send me report.pdf", "report.pdf"),
+        ("send me the file budget.xlsx", "budget.xlsx"),
+        ("send me my latest download", "latest download"),
+        ("send me latest", "latest"),
+    ],
+)
+def test_send_file_is_local(said: str, target: str):
+    result = classify_locally(said)
+
+    assert result is not None
+    assert result.intent is IntentType.SEND_FILE
+    assert result.target == target
+
+
 # -- what it must refuse ---------------------------------------------------
 
 

@@ -7,6 +7,7 @@ controller behind a Protocol was to make this suite safe to run.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,9 @@ class FakeDesktopController:
     def __init__(self, error: Exception | None = None) -> None:
         self.calls: list[tuple[str, object]] = []
         self._error = error
+        # Files the fake "sends" are written here, so the Telegram document-upload
+        # path has something real to read.
+        self._file_dir = Path(tempfile.mkdtemp(prefix="quainex-fake-files-"))
 
     def _record(self, action: str, payload: object = None) -> str:
         if self._error is not None:
@@ -49,9 +53,22 @@ class FakeDesktopController:
     def open_folder(self, path: str) -> str:
         return self._record("open_folder", path)
 
+    def create_folder(self, name: str) -> str:
+        self._record("create_folder", name)
+        return f"Created folder C:/fake/{name}."
+
     def search_files(self, query: str, limit: int) -> list[FileHit]:
         self._record("search_files", (query, limit))
         return [FileHit(path="C:/fake/report.pdf", size_bytes=10)]
+
+    def resolve_file_for_sending(self, query: str) -> Path:
+        self._record("resolve_file_for_sending", query)
+        # A real file so the Telegram bridge can read it back, like the fakes for
+        # screenshot and webcam.
+        target = self._file_dir / f"{query.replace('/', '_')}.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"fake file contents")
+        return target
 
     def lock_screen(self) -> str:
         return self._record("lock_screen")
@@ -416,6 +433,33 @@ async def test_search_results_are_returned_as_data(tmp_path):
     assert result.status is CommandStatus.SUCCEEDED
     assert result.data is not None
     assert result.data["results"][0]["path"] == "C:/fake/report.pdf"
+
+
+async def test_create_folder_reaches_the_controller(tmp_path):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.CREATE_FOLDER, "projects")
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert ("create_folder", "projects") in desktop.calls
+
+
+async def test_send_file_returns_a_readable_path_for_upload(tmp_path):
+    """A real file, reported as no side effect.
+
+    The Telegram bridge reads this path back to upload the file, so it must exist;
+    and nothing on the machine changed, so executed must be False.
+    """
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.SEND_FILE, "report.pdf")
+    )
+
+    assert result.status is CommandStatus.SUCCEEDED
+    assert result.executed is False
+    assert result.data is not None
+    assert Path(result.data["path"]).is_file()
 
 
 async def test_webcam_captures_and_returns_a_path(tmp_path):

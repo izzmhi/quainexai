@@ -113,6 +113,9 @@ _HTTP_CONFLICT = 409
 #: Telegram rejects photo uploads above 10 MB.
 _MAX_PHOTO_BYTES = 10 * 1024 * 1024
 
+#: The Bot API caps ``sendDocument`` at 50 MB.
+_MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
+
 
 class TelegramUpdate(BaseModel):
     """One update from Telegram, reduced to what the bridge uses.
@@ -477,6 +480,77 @@ class TelegramBridge:
 
         await self._send(client, chat_id, result.message)
         await self._maybe_send_image(client, chat_id, intent, result)
+        await self._maybe_send_document(client, chat_id, intent, result)
+
+    async def _maybe_send_document(
+        self,
+        client: httpx.AsyncClient,
+        chat_id: int,
+        intent: Intent,
+        result: CommandResult,
+    ) -> None:
+        """Upload a requested file as a Telegram document.
+
+        Fires for ``SEND_FILE``. Unlike an image this keeps the original file
+        exactly — any type, not re-encoded — which is the point of "send me the
+        file". The disclosure is explicit (the user named the file) and the source
+        is confined to the search roots by the controller, so there is nothing to
+        gate beyond the on/off switch.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to send it.
+            intent: What was asked for.
+            result: What happened, carrying the resolved path.
+        """
+        if intent.intent is not IntentType.SEND_FILE or not result.ok:
+            return
+        if not self._settings.telegram_send_files:
+            await self._send(
+                client,
+                chat_id,
+                "Sending files over Telegram is turned off (QUAINEX_TELEGRAM_SEND_FILES=false).",
+            )
+            return
+
+        path_value = (result.data or {}).get("path")
+        if not isinstance(path_value, str):
+            return
+        document = Path(path_value)
+        if not document.is_file():
+            _log.warning("telegram_document_missing", path=path_value)
+            return
+
+        try:
+            payload = document.read_bytes()
+        except OSError as exc:
+            _log.warning("telegram_document_unreadable", error=str(exc))
+            await self._send(client, chat_id, f"Could not read {document.name}.")
+            return
+
+        if len(payload) > _MAX_DOCUMENT_BYTES:
+            await self._send(
+                client,
+                chat_id,
+                f"{document.name} is {len(payload) // 1024 // 1024} MB, over Telegram's "
+                f"{_MAX_DOCUMENT_BYTES // 1024 // 1024} MB bot upload limit.",
+            )
+            return
+
+        try:
+            response = await client.post(
+                f"{self._url()}/sendDocument",
+                data={"chat_id": str(chat_id)},
+                files={"document": (document.name, payload, "application/octet-stream")},
+                timeout=180,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            _log.warning("telegram_document_upload_failed", error=str(exc))
+            await self._send(client, chat_id, f"{document.name} could not be sent.")
+            return
+
+        _log.info("telegram_document_sent", name=document.name, bytes=len(payload))
 
     async def _maybe_send_image(
         self,

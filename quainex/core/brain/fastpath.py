@@ -187,9 +187,32 @@ _WEB_SEARCH_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 #: Folders people name rather than describe. Matched before applications, because
 #: "open documents" is a directory and "open notepad" is a program, and only the
-#: name distinguishes them.
+#: name distinguishes them. Aliases included, since the controller accepts them and
+#: the fast path should not be pickier than what it calls.
 _KNOWN_FOLDERS = frozenset(
-    {"downloads", "documents", "desktop", "pictures", "music", "videos", "home"}
+    {
+        "downloads", "download", "documents", "document", "docs", "desktop",
+        "pictures", "picture", "photos", "images", "music", "videos", "video",
+        "movies", "home",
+    }
+)  # fmt: skip
+
+#: "create a folder called X", "make a new folder X in downloads".
+_CREATE_FOLDER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^(?:create|make|new|add) (?:a |an )?(?:new )?(?:folder|directory) (?P<target>.+)$"
+    ),
+    re.compile(r"^(?:create|make) (?P<target>.+?) (?:folder|directory)$"),
+)
+
+#: Leading noise a folder name picks up: "called reports", "named X in downloads".
+_CREATE_FOLDER_NOISE = re.compile(r"^(?:called |named |titled )")
+
+#: "send me report.pdf", "send me my latest download".
+_SEND_FILE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^send (?:me )?(?:my |the )?(?P<target>latest(?: download| file)?|last download)$"),
+    re.compile(r"^send (?:me )?(?:the file |file )?(?P<target>[\w .()\-]+\.\w{1,8})$"),
+    re.compile(r"^(?:send|share|upload) (?:me )?(?:the )?file (?P<target>.+)$"),
 )
 
 #: Explicitly-named folders: "open the downloads folder", "open my documents".
@@ -316,6 +339,17 @@ def classify_locally(utterance: str) -> IntentClassification | None:
     for pattern in _WEB_SEARCH_PATTERNS:
         if match := pattern.match(text):
             return _classification(IntentType.WEB_SEARCH, match.group("target").strip())
+
+    for pattern in _CREATE_FOLDER_PATTERNS:
+        if match := pattern.match(text):
+            name = _CREATE_FOLDER_NOISE.sub("", match.group("target").strip()).strip()
+            if name:
+                return _classification(IntentType.CREATE_FOLDER, name)
+
+    # Before file search, since "send me report.pdf" is a retrieval, not a query.
+    for pattern in _SEND_FILE_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.SEND_FILE, match.group("target").strip())
 
     # Before the application patterns, which would otherwise claim
     # "open github.com" as an application named "github.com".

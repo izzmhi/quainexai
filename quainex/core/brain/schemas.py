@@ -54,7 +54,9 @@ class IntentType(StrEnum):
     # --- Navigation ---
     OPEN_WEBSITE = "open_website"
     OPEN_FOLDER = "open_folder"
+    CREATE_FOLDER = "create_folder"
     SEARCH_FILES = "search_files"
+    SEND_FILE = "send_file"
 
     # --- System control ---
     LOCK_SCREEN = "lock_screen"
@@ -98,8 +100,19 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
     IntentType.OPEN_APPLICATION: "Launch a program. target = application name.",
     IntentType.CLOSE_APPLICATION: "Quit a running program. target = application name.",
     IntentType.OPEN_WEBSITE: "Open a URL or site in the browser. target = URL or site name.",
-    IntentType.OPEN_FOLDER: "Open a directory in the file explorer. target = folder path or name.",
+    IntentType.OPEN_FOLDER: (
+        "Open a directory in the file explorer. target = a folder word (desktop, "
+        "downloads, documents, pictures, music, videos) or a path."
+    ),
+    IntentType.CREATE_FOLDER: (
+        "Make a new folder and open it. target = the folder name, optionally "
+        "prefixed with a location, e.g. 'projects' or 'documents/tax 2026'."
+    ),
     IntentType.SEARCH_FILES: "Find files on disk. target = the search query.",
+    IntentType.SEND_FILE: (
+        "Send a file from this machine to the person (over Telegram). target = the "
+        "file name, or 'latest' for the most recent download."
+    ),
     IntentType.LOCK_SCREEN: "Lock the workstation. No target.",
     IntentType.SLEEP: "Put the machine to sleep. No target.",
     IntentType.RESTART: "Reboot the machine. No target.",

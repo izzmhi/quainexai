@@ -113,6 +113,93 @@ def _netsh_field(output: str, label: str) -> str | None:
     return None
 
 
+#: Windows KNOWNFOLDERID GUIDs for the folders people name by word.
+#:
+#: Resolved through ``SHGetKnownFolderPath`` rather than assumed to sit at
+#: ``~/Downloads`` and so on, because that assumption is wrong on any machine with
+#: OneDrive: this one's Desktop is ``~/OneDrive/Desktop`` and ``~/Desktop`` does not
+#: exist at all. Guessing the literal path is exactly why "open desktop" opened the
+#: home directory instead.
+_KNOWN_FOLDER_IDS: dict[str, str] = {
+    "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+    "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    "documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+    "pictures": "{33E28130-4E1E-4676-835A-98395C3BC3BB}",
+    "music": "{4BD8D571-6D19-48D3-BE97-422220080E43}",
+    "videos": "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}",
+    "home": "{5E6C858F-0E22-4760-9AFE-EA3317B67173}",
+}
+
+#: Words people use for each known folder, folded to the canonical key above.
+_FOLDER_ALIASES: dict[str, str] = {
+    "desktop": "desktop",
+    "downloads": "downloads",
+    "download": "downloads",
+    "documents": "documents",
+    "document": "documents",
+    "docs": "documents",
+    "pictures": "pictures",
+    "picture": "pictures",
+    "photos": "pictures",
+    "images": "pictures",
+    "music": "music",
+    "videos": "videos",
+    "video": "videos",
+    "movies": "videos",
+    "home": "home",
+    "profile": "home",
+}
+
+
+class _GUID(ctypes.Structure):
+    """A Windows ``GUID``, built from its string form."""
+
+    _fields_ = (
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    )
+
+    def __init__(self, guid: str) -> None:
+        """Parse a ``{...}`` GUID string.
+
+        Args:
+            guid: The GUID in registry string form.
+        """
+        super().__init__()
+        ctypes.windll.ole32.CLSIDFromString(guid, ctypes.byref(self))
+
+
+def resolve_known_folder(name: str) -> Path | None:
+    """Return the real path of a named Windows folder, or ``None``.
+
+    Handles OneDrive and other redirections, because it asks Windows where the
+    folder actually is rather than assuming it lives under the home directory.
+
+    Args:
+        name: A folder word such as ``"desktop"`` or ``"downloads"``. Aliases like
+            "docs" and "photos" are accepted.
+
+    Returns:
+        The resolved path, or ``None`` when the name is not a known folder or the
+        lookup fails.
+    """
+    key = _FOLDER_ALIASES.get(name.strip().lower())
+    if key is None:
+        return None
+
+    folder_id = _GUID(_KNOWN_FOLDER_IDS[key])
+    pointer = ctypes.c_wchar_p()
+    result = ctypes.windll.shell32.SHGetKnownFolderPath(
+        ctypes.byref(folder_id), 0, None, ctypes.byref(pointer)
+    )
+    value = pointer.value
+    ctypes.windll.ole32.CoTaskMemFree(pointer)
+    # S_OK is 0; anything else means the folder is not present on this machine.
+    return Path(value) if result == 0 and value else None
+
+
 def _system_executable(name: str) -> str:
     """Resolve a Windows system executable to an absolute path.
 
@@ -277,8 +364,13 @@ class WindowsDesktopController:
     def open_folder(self, path: str) -> str:
         """Reveal a directory in File Explorer.
 
+        A bare folder word — "desktop", "downloads", "documents" — is resolved
+        through the Windows known-folder API, so it finds the real location even
+        when OneDrive has redirected it. Anything else is treated as a path,
+        absolute or relative to home, and confined to the permitted roots.
+
         Args:
-            path: Folder path, absolute or relative to the user's home.
+            path: Folder name or path.
 
         Returns:
             A short description of what was opened.
@@ -287,15 +379,103 @@ class WindowsDesktopController:
             CommandNotAllowedError: The path escapes the permitted roots.
             CommandExecutionError: The path does not exist or is not a directory.
         """
-        resolved = self._resolve_within_roots(path)
+        resolved = self._resolve_folder(path)
         if not resolved.exists():
-            raise CommandExecutionError(f"'{resolved}' does not exist.")
+            raise CommandExecutionError(
+                f"'{resolved}' does not exist. Say 'create a folder called …' to make it."
+            )
         if not resolved.is_dir():
             raise CommandExecutionError(f"'{resolved}' is not a folder.")
 
         os.startfile(resolved)  # noqa: S606 - path validated against permitted roots
         _log.info("folder_opened", path=str(resolved))
         return f"Opened {resolved}."
+
+    def create_folder(self, name: str) -> str:
+        """Create a folder and reveal it.
+
+        "projects" makes ``Desktop/projects``; "downloads/reports" makes a
+        sub-folder under Downloads. A location word at the front is honoured, so
+        "documents/tax 2026" lands in the real Documents folder even when it is
+        redirected to OneDrive. Everything is confined to the permitted roots.
+
+        Args:
+            name: The folder to create, optionally prefixed with a known folder.
+
+        Returns:
+            A confirmation naming the created folder.
+
+        Raises:
+            CommandNotAllowedError: The target escapes the permitted roots, or the
+                name is empty.
+            CommandExecutionError: The folder could not be created.
+        """
+        cleaned = name.strip().strip("/\\").strip()
+        if not cleaned:
+            raise CommandNotAllowedError("A folder needs a name.")
+
+        target = self._resolve_new_folder(cleaned)
+        try:
+            existed = target.exists()
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CommandExecutionError(f"Could not create '{target}': {exc}") from exc
+
+        os.startfile(target)  # noqa: S606 - path validated against permitted roots
+        _log.info("folder_created", path=str(target), existed=existed)
+        verb = "Opened existing" if existed else "Created"
+        return f"{verb} folder {target}."
+
+    def resolve_file_for_sending(self, query: str) -> Path:
+        """Find a single file to send off the machine.
+
+        Three shapes, in order:
+          * "latest" / "latest download" / "recent" — the newest file in Downloads.
+          * a name containing a path separator or extension — resolved as a path.
+          * a bare name — the most recently modified file whose name contains it,
+            searched across the permitted roots.
+
+        Every result is confined to the permitted roots, so this cannot be turned
+        into "send me any file on the disk".
+
+        Args:
+            query: What to send.
+
+        Returns:
+            The resolved file path.
+
+        Raises:
+            CommandNotAllowedError: The query is empty or escapes the roots.
+            CommandExecutionError: No matching file was found.
+        """
+        needle = query.strip()
+        if not needle:
+            raise CommandNotAllowedError("Name a file to send.")
+
+        if needle.lower() in {
+            "latest",
+            "recent",
+            "latest download",
+            "last download",
+            "latest file",
+        }:
+            newest = self._newest_in_known_folder("downloads")
+            if newest is None:
+                raise CommandExecutionError("Your Downloads folder is empty.")
+            return newest
+
+        # A path-ish query (has a separator or a suffix) is resolved directly.
+        if "/" in needle or "\\" in needle or Path(needle).suffix:
+            candidate = self._resolve_folder(needle)
+            if candidate.is_file():
+                return candidate
+            # Fall through to a name search when the exact path is not a file:
+            # "report.pdf" is a name, not a path, on most phrasings.
+
+        match = self._newest_matching_file(needle)
+        if match is None:
+            raise CommandExecutionError(f"No file matching '{needle}' was found in your folders.")
+        return match
 
     def search_files(self, query: str, limit: int) -> list[FileHit]:
         """Find files whose name contains ``query`` under the permitted roots.
@@ -698,6 +878,120 @@ class WindowsDesktopController:
         """
         return [root for root in self._settings.resolved_search_roots if root.is_dir()]
 
+    def _resolve_folder(self, path: str) -> Path:
+        """Resolve a folder word or path to a real, permitted location.
+
+        A single known-folder word maps through the Windows API; anything with a
+        separator has its first segment resolved as a known folder when it is one
+        ("downloads/reports"), so redirection is handled at any depth. The result
+        is confined to the permitted roots.
+
+        Args:
+            path: Folder name or path from the utterance.
+
+        Returns:
+            The resolved, contained path.
+
+        Raises:
+            CommandNotAllowedError: The path escapes every permitted root.
+        """
+        cleaned = path.strip().strip("/\\")
+
+        known = resolve_known_folder(cleaned)
+        if known is not None:
+            return self._contain(known)
+
+        # "downloads/reports/2026": resolve the leading known folder, keep the rest.
+        head, sep, tail = cleaned.replace("\\", "/").partition("/")
+        base = resolve_known_folder(head)
+        if base is not None and sep:
+            return self._contain((base / tail).resolve())
+
+        return self._resolve_within_roots(cleaned)
+
+    def _resolve_new_folder(self, name: str) -> Path:
+        """Resolve where a to-be-created folder should live.
+
+        A bare name defaults to the Desktop — where "make a folder" most naturally
+        means — while a leading known-folder word places it elsewhere. Confined to
+        the permitted roots like everything else.
+
+        Args:
+            name: The folder name, possibly prefixed with a location.
+
+        Returns:
+            The contained target path.
+
+        Raises:
+            CommandNotAllowedError: The target escapes the permitted roots.
+        """
+        head, sep, tail = name.replace("\\", "/").partition("/")
+        base = resolve_known_folder(head)
+        if base is not None and sep and tail:
+            return self._contain((base / tail).resolve())
+
+        desktop = resolve_known_folder("desktop") or Path.home()
+        return self._contain((desktop / name).resolve())
+
+    def _newest_in_known_folder(self, folder: str) -> Path | None:
+        """Return the most recently modified file directly in a known folder.
+
+        Args:
+            folder: A known-folder word, e.g. ``"downloads"``.
+
+        Returns:
+            The newest file, or ``None`` when the folder is empty or absent.
+        """
+        base = resolve_known_folder(folder)
+        if base is None or not base.is_dir():
+            return None
+        files = [p for p in base.iterdir() if p.is_file()]
+        return max(files, key=lambda p: p.stat().st_mtime) if files else None
+
+    def _newest_matching_file(self, needle: str) -> Path | None:
+        """Return the newest file under the roots whose name contains ``needle``.
+
+        Args:
+            needle: Substring to match against file names, case-insensitively.
+
+        Returns:
+            The best match, or ``None``.
+        """
+        lowered = needle.lower()
+        best: Path | None = None
+        best_mtime = -1.0
+        for root in self._search_roots():
+            for candidate in self._walk(root, self._settings.command_search_max_results):
+                if lowered not in candidate.name.lower():
+                    continue
+                try:
+                    mtime = candidate.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime > best_mtime:
+                    best, best_mtime = candidate, mtime
+        return best
+
+    def _contain(self, resolved: Path) -> Path:
+        """Confirm a resolved path stays inside a permitted root.
+
+        Args:
+            resolved: An already-canonicalised path.
+
+        Returns:
+            The path, unchanged.
+
+        Raises:
+            CommandNotAllowedError: The path escapes every permitted root.
+        """
+        roots = self._settings.resolved_search_roots
+        if not any(resolved.is_relative_to(root) for root in roots):
+            allowed = ", ".join(str(r) for r in roots)
+            raise CommandNotAllowedError(
+                f"'{resolved}' is outside the folders Quainex may touch. Allowed: {allowed}."
+            )
+        return resolved
+
     def _resolve_within_roots(self, path: str) -> Path:
         """Resolve a path and confirm it stays inside a permitted root.
 
@@ -715,14 +1009,7 @@ class WindowsDesktopController:
         """
         raw = Path(path.strip()).expanduser()
         resolved = (raw if raw.is_absolute() else Path.home() / raw).resolve()
-
-        roots = self._settings.resolved_search_roots
-        if not any(resolved.is_relative_to(root) for root in roots):
-            allowed = ", ".join(str(r) for r in roots)
-            raise CommandNotAllowedError(
-                f"'{resolved}' is outside the folders Quainex may open. Allowed: {allowed}."
-            )
-        return resolved
+        return self._contain(resolved)
 
     @staticmethod
     def _walk(root: Path, budget: int) -> list[Path]:

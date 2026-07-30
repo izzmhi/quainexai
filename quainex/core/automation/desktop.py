@@ -97,8 +97,16 @@ class DesktopController(Protocol):
         """Reveal a directory in the file explorer."""
         ...
 
+    def create_folder(self, name: str) -> str:
+        """Create a folder and reveal it."""
+        ...
+
     def search_files(self, query: str, limit: int) -> list[FileHit]:
         """Find files whose name matches ``query`` under the allowed roots."""
+        ...
+
+    def resolve_file_for_sending(self, query: str) -> Path:
+        """Find a single file, within permitted roots, to send off the machine."""
         ...
 
     # --- Session and power ---

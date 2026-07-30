@@ -182,6 +182,17 @@ def build_commands(settings: Settings) -> list[Command]:
             message=ctx.desktop.screenshot(destination), data={"path": str(destination)}
         )
 
+    async def create_folder(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.create_folder(_target(intent)))
+
+    async def send_file(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        path = ctx.desktop.resolve_file_for_sending(_target(intent))
+        # The path travels in `data` so the Telegram bridge can upload the file.
+        # Over the local API this is just a confirmation with the location.
+        return CommandOutcome(
+            message=f"Sending {path.name}.", data={"path": str(path), "name": path.name}
+        )
+
     async def webcam(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         destination = settings.screenshot_dir / f"quainex-webcam-{stamp}.jpg"
@@ -382,6 +393,19 @@ def build_commands(settings: Settings) -> list[Command]:
             intent=IntentType.SCREENSHOT,
             summary="Capture the screen to a PNG file.",
             handler=screenshot,
+        ),
+        Command(
+            intent=IntentType.CREATE_FOLDER,
+            summary="Create a folder and open it.",
+            handler=create_folder,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.SEND_FILE,
+            summary="Send a file from this machine (over Telegram).",
+            handler=send_file,
+            requires_target=True,
+            has_side_effect=False,
         ),
         Command(
             intent=IntentType.WEBCAM,
