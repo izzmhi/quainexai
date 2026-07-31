@@ -166,6 +166,22 @@ _MENU_LAYOUT: tuple[tuple[tuple[str, str], ...], ...] = (
     (("📊 Status", "status"), ("📶 Wi-Fi", "wifi")),
 )
 
+#: Intents whose successful result carries a file to upload as a document.
+_DOCUMENT_INTENTS: frozenset[IntentType] = frozenset(
+    {IntentType.SEND_FILE, IntentType.SEND_FOLDER}
+)
+
+#: Cap on remembered file-browser paths. Each folder listing mints short tokens for
+#: its entries (Telegram limits callback data to 64 bytes, too little for a full
+#: path), and this bounds how many are kept so browsing cannot grow memory without
+#: limit. Old tokens fall off the front; a tap on a long-stale button just re-opens
+#: the browser rather than acting.
+_MAX_BROWSE_TOKENS = 2000
+
+#: How many entries a single folder listing shows, so a large directory does not
+#: build a keyboard Telegram will reject.
+_BROWSE_PAGE = 40
+
 
 class TelegramUpdate(BaseModel):
     """One update from Telegram, reduced to what the bridge uses.
@@ -228,6 +244,10 @@ class TelegramBridge:
         #: Confirmation tokens keyed by a short id, because Telegram limits
         #: callback_data to 64 bytes and a signed token is far longer.
         self._pending: dict[str, tuple[Intent, str]] = {}
+        #: File-browser tokens → absolute paths, for the same 64-byte reason. A
+        #: monotonic counter names them; the map is bounded (see ``_MAX_BROWSE_TOKENS``).
+        self._browse_paths: dict[str, str] = {}
+        self._browse_seq = 0
         #: When the last poll returned. Observed rather than declared — see
         #: ``status``, where a boolean flag alone turned out to be a liability.
         self._last_poll_at: float | None = None
@@ -360,6 +380,7 @@ class TelegramBridge:
                 json={
                     "commands": [
                         {"command": "menu", "description": "Quick-action buttons"},
+                        {"command": "files", "description": "Browse folders and grab a file"},
                         {"command": "help", "description": "Everything Quainex can do"},
                         {"command": "status", "description": "A live snapshot of this machine"},
                         {"command": "start", "description": "Welcome and a few examples"},
@@ -561,8 +582,12 @@ class TelegramBridge:
         """
         command = text.strip()
         if command.startswith("/"):
-            if command.split()[0].lower() == "/menu":
+            verb = command.split()[0].lower()
+            if verb == "/menu":
                 await self._send_menu(client, chat_id)
+                return
+            if verb == "/files":
+                await self._send_files_root(client, chat_id)
                 return
             await self._send(client, chat_id, await self._builtin(command), parse_mode="HTML")
             return
@@ -682,6 +707,145 @@ class TelegramBridge:
         result = await self._commands.execute(intent)
         await self._deliver(client, chat_id, intent, result)
 
+    # -- file browser ------------------------------------------------------
+
+    def _browse_token(self, path: str) -> str:
+        """Mint a short token for a path, so it fits in Telegram's callback data.
+
+        A full path is far longer than the 64 bytes callback data allows, so each
+        listed entry is referenced by a tiny id that maps back to its path here.
+        Bounded: the oldest token falls off once the map is full, and a tap on one
+        that has aged out just says so rather than acting on a wrong path.
+
+        Args:
+            path: The absolute path to remember.
+
+        Returns:
+            The token to put in a button.
+        """
+        self._browse_seq += 1
+        token = f"p{self._browse_seq}"
+        self._browse_paths[token] = path
+        if len(self._browse_paths) > _MAX_BROWSE_TOKENS:
+            del self._browse_paths[next(iter(self._browse_paths))]
+        return token
+
+    async def _send_files_root(self, client: httpx.AsyncClient, chat_id: int) -> None:
+        """Open the file browser at the permitted roots.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to send.
+        """
+        roots = self._commands.context.desktop.browse_roots()
+        if not roots:
+            await self._send(client, chat_id, "No browsable folders are configured.")
+            return
+        rows = [
+            [
+                {
+                    "text": f"📁 {_esc(str(root))}",
+                    "callback_data": f"nav:{self._browse_token(str(root))}",
+                }
+            ]
+            for root in roots
+        ]
+        await client.post(
+            f"{self._url()}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "📂 <b>Your folders</b>\nTap to open. Tap a file to receive it.",
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": rows},
+            },
+        )
+
+    async def _send_directory(self, client: httpx.AsyncClient, chat_id: int, path: str) -> None:
+        """List a folder as tappable buttons: sub-folders to open, files to receive.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to send.
+            path: The folder to list.
+        """
+        listing = self._commands.context.desktop.list_directory(path, limit=_BROWSE_PAGE)
+
+        rows: list[list[dict[str, str]]] = []
+        top: list[dict[str, str]] = []
+        if listing.parent:
+            top.append(
+                {"text": "⬆️ Up", "callback_data": f"nav:{self._browse_token(listing.parent)}"}
+            )
+        if self._settings.telegram_send_files:
+            top.append(
+                {
+                    "text": "📦 Send this folder",
+                    "callback_data": f"zipdir:{self._browse_token(listing.path)}",
+                }
+            )
+        if top:
+            rows.append(top)
+
+        for entry in listing.entries:
+            if entry.is_dir:
+                label = f"📁 {entry.name}"
+                data = f"nav:{self._browse_token(entry.path)}"
+            else:
+                size = "" if entry.size_bytes is None else f"  ·  {_human_size(entry.size_bytes)}"
+                label = f"📄 {entry.name}{size}"
+                data = f"get:{self._browse_token(entry.path)}"
+            rows.append([{"text": label[:60], "callback_data": data}])
+
+        header = f"📂 <b>{_esc(listing.path)}</b>"
+        if not listing.entries:
+            header += "\n<i>(empty)</i>"
+        if listing.truncated:
+            header += f"\n<i>Showing the first {_BROWSE_PAGE}.</i>"
+        await client.post(
+            f"{self._url()}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": header,
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": rows},
+            },
+        )
+
+    async def _handle_browse_button(
+        self, client: httpx.AsyncClient, chat_id: int, kind: str, token: str
+    ) -> None:
+        """Act on a file-browser button: navigate, receive a file, or zip a folder.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to reply.
+            kind: ``nav``, ``get`` or ``zipdir``.
+            token: The path token from the button.
+        """
+        path = self._browse_paths.get(token)
+        if path is None:
+            await self._send(client, chat_id, "That listing has expired — open /files again.")
+            return
+
+        if kind == "nav":
+            await self._send_directory(client, chat_id, path)
+            return
+
+        if not self._settings.telegram_send_files:
+            await self._send(
+                client,
+                chat_id,
+                "Sending files over Telegram is turned off (QUAINEX_TELEGRAM_SEND_FILES=false).",
+            )
+            return
+
+        async with self._typing(client, chat_id):
+            if kind == "zipdir":
+                archive = self._commands.context.desktop.zip_folder(path)
+                await self._upload_document(client, chat_id, archive)
+            else:  # get
+                await self._upload_document(client, chat_id, Path(path))
+
     @contextlib.asynccontextmanager
     async def _typing(self, client: httpx.AsyncClient, chat_id: int) -> AsyncIterator[None]:
         """Show a "typing…" indicator in the chat for the duration of a block.
@@ -740,13 +904,13 @@ class TelegramBridge:
         intent: Intent,
         result: CommandResult,
     ) -> None:
-        """Upload a requested file as a Telegram document.
+        """Upload a requested file or zipped folder as a Telegram document.
 
-        Fires for ``SEND_FILE``. Unlike an image this keeps the original file
-        exactly — any type, not re-encoded — which is the point of "send me the
-        file". The disclosure is explicit (the user named the file) and the source
-        is confined to the search roots by the controller, so there is nothing to
-        gate beyond the on/off switch.
+        Fires for ``SEND_FILE`` and ``SEND_FOLDER``. Unlike an image this keeps the
+        bytes exactly — any type, not re-encoded — which is the point of "send me
+        the file". The disclosure is explicit (the user named it) and the source is
+        confined to the search roots by the controller, so there is nothing to gate
+        beyond the on/off switch.
 
         Args:
             client: HTTP client.
@@ -754,7 +918,7 @@ class TelegramBridge:
             intent: What was asked for.
             result: What happened, carrying the resolved path.
         """
-        if intent.intent is not IntentType.SEND_FILE or not result.ok:
+        if intent.intent not in _DOCUMENT_INTENTS or not result.ok:
             return
         if not self._settings.telegram_send_files:
             await self._send(
@@ -765,11 +929,26 @@ class TelegramBridge:
             return
 
         path_value = (result.data or {}).get("path")
-        if not isinstance(path_value, str):
-            return
-        document = Path(path_value)
+        if isinstance(path_value, str):
+            await self._upload_document(client, chat_id, Path(path_value))
+
+    async def _upload_document(
+        self, client: httpx.AsyncClient, chat_id: int, document: Path
+    ) -> None:
+        """Upload one file to the chat as a document, with a size guard.
+
+        Shared by "send me <file>", the zipped-folder send, and the file browser's
+        tap-to-receive. Keeps the file byte-for-byte and reports rather than fails
+        silently when it is missing, unreadable, or over Telegram's limit.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to send it.
+            document: The file to upload.
+        """
         if not document.is_file():
-            _log.warning("telegram_document_missing", path=path_value)
+            _log.warning("telegram_document_missing", path=str(document))
+            await self._send(client, chat_id, f"{document.name} is no longer there.")
             return
 
         try:
@@ -898,6 +1077,14 @@ class TelegramBridge:
         if data.startswith("do:"):
             await self._handle_menu_action(client, update.chat_id, data[3:])
             return
+
+        for kind in ("nav", "get", "zipdir"):
+            prefix = f"{kind}:"
+            if data.startswith(prefix):
+                await self._handle_browse_button(
+                    client, update.chat_id, kind, data[len(prefix) :]
+                )
+                return
 
         if data.startswith("no:"):
             self._pending.pop(data[3:], None)
@@ -1241,6 +1428,25 @@ def _truncate(text: str) -> str:
     return text[:_MAX_MESSAGE_CHARS] + "\n\n…(truncated)"
 
 
+def _human_size(size: int | None) -> str:
+    """Render a byte count as a short human string.
+
+    Args:
+        size: The size in bytes, or ``None``.
+
+    Returns:
+        Something like ``4 KB`` or ``2 MB``; empty when unknown.
+    """
+    if size is None:
+        return ""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            return f"{value:.0f} {unit}"
+        value /= 1024
+    return f"{value:.0f} TB"
+
+
 def _esc(text: str) -> str:
     """Escape the three characters that carry meaning in Telegram HTML.
 
@@ -1284,6 +1490,7 @@ _WELCOME = (
     "• <code>send me my latest download</code>\n\n"
     "Anything risky asks first, with <b>Yes</b> / <b>No</b> buttons.\n\n"
     "<b>/menu</b> — quick-action buttons\n"
+    "<b>/files</b> — browse folders and grab a file\n"
     "<b>/help</b> — everything I can do\n"
     "<b>/status</b> — a live snapshot of this machine"
 )
@@ -1309,10 +1516,12 @@ _HELP = (
     "• <code>take a screenshot</code>\n"
     "• <code>take a webcam photo</code>\n\n"
     "📁 <b>Files &amp; folders</b>\n"
+    "• <b>/files</b> — browse folders, tap a file to receive it\n"
     "• <code>open downloads</code> · <code>open desktop</code>\n"
     "• <code>create a folder called work</code>\n"
     "• <code>find report.pdf</code>\n"
     "• <code>send me my latest download</code>\n"
+    "• <code>send me my work folder</code> — zips and sends it\n"
     "• <b>Attach any file</b> with a caption like "
     "<code>save to documents as report.pdf</code> — I'll save it here\n\n"
     "🛡 <b>Security &amp; location</b>\n"

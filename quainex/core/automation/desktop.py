@@ -53,6 +53,39 @@ class FileHit(BaseModel):
     size_bytes: int | None = None
 
 
+class DirectoryEntry(BaseModel):
+    """One entry in a browsed directory.
+
+    Attributes:
+        name: The entry's display name (its final path component).
+        path: Absolute path to the entry.
+        is_dir: Whether it is a directory.
+        size_bytes: File size, or ``None`` for directories and unreadable files.
+    """
+
+    name: str
+    path: str
+    is_dir: bool
+    size_bytes: int | None = None
+
+
+class DirectoryListing(BaseModel):
+    """The contents of a browsed directory, for the Telegram file browser.
+
+    Attributes:
+        path: The directory being listed.
+        parent: The parent to go "up" to, or ``None`` when at a permitted root
+            (there is nowhere safe above it to browse).
+        entries: Sub-directories first, then files; each already contained.
+        truncated: Whether the listing was cut off at the display limit.
+    """
+
+    path: str
+    parent: str | None
+    entries: list[DirectoryEntry]
+    truncated: bool = False
+
+
 class SystemSnapshot(BaseModel):
     """A point-in-time view of machine health.
 
@@ -107,6 +140,18 @@ class DesktopController(Protocol):
 
     def resolve_file_for_sending(self, query: str) -> Path:
         """Find a single file, within permitted roots, to send off the machine."""
+        ...
+
+    def browse_roots(self) -> list[Path]:
+        """Return the permitted root directories, for the top of the file browser."""
+        ...
+
+    def list_directory(self, path: str, *, limit: int = 60) -> DirectoryListing:
+        """List a directory's contents, confined to the permitted roots."""
+        ...
+
+    def zip_folder(self, query: str) -> Path:
+        """Zip a folder within the permitted roots and return the archive path."""
         ...
 
     def save_incoming_file(

@@ -911,3 +911,122 @@ async def test_the_startup_ping_can_be_silenced(tmp_path):
     await bridge._announce_online(client)  # type: ignore[arg-type]
 
     assert client.sent == []
+
+
+# -- the file browser: navigate with buttons, tap to receive --------------
+
+
+class BrowseClient(MenuClient):
+    """Records keyboards *and* uploaded documents, for the file browser."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.documents: list[tuple[str, int]] = []
+
+    async def post(self, url: str, **kwargs: object) -> object:
+        if url.endswith("/sendDocument"):
+            files = kwargs.get("files")
+            if isinstance(files, dict) and "document" in files:
+                name, payload, *_ = files["document"]
+                self.documents.append((str(name), len(payload)))
+            return _OkResponse()
+        return await super().post(url, **kwargs)
+
+
+async def test_files_opens_the_root_browser(tmp_path):
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = BrowseClient()
+
+    await bridge._send_files_root(client, 7)  # type: ignore[arg-type]
+
+    assert any(c[0] == "browse_roots" for c in desktop.calls)
+    buttons = [b for row in client.keyboards[0]["inline_keyboard"] for b in row]  # type: ignore[index]
+    assert buttons and all(b["callback_data"].startswith("nav:") for b in buttons)
+
+
+async def test_tapping_a_folder_lists_its_contents(tmp_path):
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = BrowseClient()
+
+    await bridge._send_files_root(client, 7)  # type: ignore[arg-type]
+    root_button = client.keyboards[0]["inline_keyboard"][0][0]  # type: ignore[index]
+    await bridge._dispatch(client, _button_update(root_button["callback_data"]))  # type: ignore[arg-type]
+
+    # The fake lists a sub-folder and a file; both appear as buttons.
+    labels = [b["text"] for row in client.keyboards[-1]["inline_keyboard"] for b in row]  # type: ignore[index]
+    assert any("sub" in label for label in labels)
+    assert any("a.txt" in label for label in labels)
+
+
+async def test_tapping_a_file_uploads_it(tmp_path):
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = BrowseClient()
+    real = tmp_path / "grab-me.bin"
+    real.write_bytes(b"payload")
+    token = bridge._browse_token(str(real))
+
+    await bridge._handle_browse_button(client, 7, "get", token)  # type: ignore[arg-type]
+
+    assert client.documents == [("grab-me.bin", len(b"payload"))]
+
+
+async def test_send_this_folder_button_zips_and_uploads(tmp_path):
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = BrowseClient()
+    token = bridge._browse_token("work")
+
+    await bridge._handle_browse_button(client, 7, "zipdir", token)  # type: ignore[arg-type]
+
+    assert any(c == ("zip_folder", "work") for c in desktop.calls)
+    assert client.documents and client.documents[0][0].endswith(".zip")
+
+
+async def test_a_receive_with_files_disabled_is_declined(tmp_path):
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_send_files=False,
+    )
+    client = BrowseClient()
+    token = bridge._browse_token(str(tmp_path / "x"))
+
+    await bridge._handle_browse_button(client, 7, "get", token)  # type: ignore[arg-type]
+
+    assert client.documents == []
+    assert any("turned off" in message for message in client.sent)
+
+
+async def test_an_expired_browse_token_says_so(tmp_path):
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = BrowseClient()
+
+    await bridge._handle_browse_button(client, 7, "nav", "p999999")  # type: ignore[arg-type]
+
+    assert any("expired" in message for message in client.sent)

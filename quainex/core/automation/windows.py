@@ -39,6 +39,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import webbrowser
 from ctypes import wintypes
@@ -49,7 +50,13 @@ from urllib.parse import urlparse
 import psutil
 
 from quainex.core.automation.applications import resolve_application
-from quainex.core.automation.desktop import FileHit, LevelChange, SystemSnapshot
+from quainex.core.automation.desktop import (
+    DirectoryEntry,
+    DirectoryListing,
+    FileHit,
+    LevelChange,
+    SystemSnapshot,
+)
 from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
 from quainex.core.logging import get_logger
 
@@ -302,6 +309,21 @@ _RESERVED_NAMES = frozenset(
 #: Cap on a saved file name, leaving room for a de-duplication suffix under the
 #: Windows path limits.
 _MAX_NAME_LENGTH = 200
+
+
+def _safe_size(path: Path) -> int | None:
+    """Return a file's size, or ``None`` when it cannot be read.
+
+    Args:
+        path: The file.
+
+    Returns:
+        The size in bytes, or ``None``.
+    """
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def _safe_filename(name: str) -> str:
@@ -780,6 +802,102 @@ class WindowsDesktopController:
         if match is None:
             raise CommandExecutionError(f"No file matching '{needle}' was found in your folders.")
         return match
+
+    def browse_roots(self) -> list[Path]:
+        """Return the permitted root directories that exist.
+
+        These are the top of the Telegram file browser — the only places it may
+        start from, so browsing can never begin outside what search is allowed to
+        see.
+
+        Returns:
+            The existing permitted roots.
+        """
+        return self._search_roots()
+
+    def list_directory(self, path: str, *, limit: int = 60) -> DirectoryListing:
+        """List a directory's contents, confined to the permitted roots.
+
+        Sub-directories come first, then files, each sorted by name; hidden and
+        system entries are skipped as noise. The "up" target is the parent only when
+        the parent is itself inside a permitted root — so browsing can walk down and
+        back up within the allowed area, but never step above it.
+
+        Args:
+            path: A folder word ("downloads") or an absolute path, contained.
+            limit: The most entries to return, so a huge directory does not build a
+                keyboard Telegram will reject.
+
+        Returns:
+            The listing.
+
+        Raises:
+            CommandNotAllowedError: The path escapes the permitted roots.
+            CommandExecutionError: The directory could not be read.
+        """
+        resolved = self._resolve_folder(path)
+        if not resolved.is_dir():
+            raise CommandExecutionError(f"'{resolved}' is not a folder.")
+
+        try:
+            children = list(resolved.iterdir())
+        except OSError as exc:
+            raise CommandExecutionError(f"Could not open '{resolved}': {exc}") from exc
+
+        visible = [c for c in children if not c.name.startswith((".", "$"))]
+        folders = sorted((c for c in visible if c.is_dir()), key=lambda p: p.name.lower())
+        files = sorted((c for c in visible if c.is_file()), key=lambda p: p.name.lower())
+        ordered = folders + files
+        truncated = len(ordered) > limit
+
+        entries: list[DirectoryEntry] = []
+        for child in ordered[:limit]:
+            is_dir = child.is_dir()
+            size = None if is_dir else _safe_size(child)
+            entries.append(
+                DirectoryEntry(name=child.name, path=str(child), is_dir=is_dir, size_bytes=size)
+            )
+
+        roots = self._settings.resolved_search_roots
+        parent = resolved.parent
+        parent_ok = parent != resolved and any(parent.is_relative_to(root) for root in roots)
+        return DirectoryListing(
+            path=str(resolved),
+            parent=str(parent) if parent_ok else None,
+            entries=entries,
+            truncated=truncated,
+        )
+
+    def zip_folder(self, query: str) -> Path:
+        """Zip a folder within the permitted roots and return the archive.
+
+        The archive is written to a temporary directory, named after the folder, so
+        "send me my work folder" arrives as ``work.zip``. Confined to the permitted
+        roots like every other path, so this cannot become "zip up the whole drive".
+
+        Args:
+            query: A folder word or path.
+
+        Returns:
+            The path to the created ``.zip``.
+
+        Raises:
+            CommandNotAllowedError: The path escapes the permitted roots.
+            CommandExecutionError: The folder is missing, or zipping failed.
+        """
+        folder = self._resolve_folder(query)
+        if not folder.is_dir():
+            raise CommandExecutionError(f"'{folder}' is not a folder.")
+
+        workspace = Path(tempfile.mkdtemp(prefix="quainex-zip-"))
+        base = workspace / folder.name
+        try:
+            archive = shutil.make_archive(str(base), "zip", root_dir=str(folder))
+        except OSError as exc:
+            raise CommandExecutionError(f"Could not zip '{folder}': {exc}") from exc
+
+        _log.info("folder_zipped", folder=str(folder), archive=archive)
+        return Path(archive)
 
     def save_incoming_file(
         self, data: bytes, *, suggested_name: str, location: str | None

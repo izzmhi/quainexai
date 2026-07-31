@@ -207,6 +207,44 @@ def test_an_empty_or_dotted_name_falls_back(controller):
     assert _safe_filename("...").startswith("file-")
 
 
+def test_browse_lists_a_directory_within_the_root(controller, tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "note.txt").write_bytes(b"hi")
+    listing = controller.list_directory(str(tmp_path))
+
+    names = [e.name for e in listing.entries]
+    assert "sub" in names and "note.txt" in names
+    # Directories first, then files.
+    assert listing.entries[0].is_dir is True
+    # At a permitted root there is nowhere safe to go up to.
+    assert listing.parent is None
+
+
+def test_browse_can_step_up_within_the_root(controller, tmp_path):
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    listing = controller.list_directory(str(tmp_path / "a" / "b"))
+    assert listing.parent == str(tmp_path / "a")
+
+
+def test_browsing_outside_the_root_is_refused(controller):
+    with pytest.raises(CommandNotAllowedError, match="outside the folders"):
+        controller.list_directory("C:/Windows")
+
+
+def test_zip_folder_archives_within_the_root(controller, tmp_path):
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / "a.txt").write_bytes(b"content")
+    archive = controller.zip_folder(str(tmp_path / "proj"))
+    assert archive.suffix == ".zip"
+    assert archive.is_file()
+    assert archive.stat().st_size > 0
+
+
+def test_zipping_outside_the_root_is_refused(controller):
+    with pytest.raises(CommandNotAllowedError, match="outside the folders"):
+        controller.zip_folder("C:/Windows")
+
+
 def test_type_text_sends_two_keystrokes_per_character(controller, monkeypatch):
     """Each character is a key-down and a key-up, sent via one SendInput call."""
     import ctypes

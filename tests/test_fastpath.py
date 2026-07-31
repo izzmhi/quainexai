@@ -548,3 +548,27 @@ def test_download_without_a_location_carries_no_location():
     assert result is not None
     assert result.intent is IntentType.DOWNLOAD_URL
     assert result.parameters == []
+
+
+# -- sending a whole folder vs a single file ------------------------------
+
+
+def test_send_my_folder_is_classified_as_send_folder():
+    result = classify_locally("send me my work folder")
+    assert result is not None
+    assert result.intent is IntentType.SEND_FOLDER
+    assert result.target == "work"
+
+
+def test_zip_and_send_is_send_folder():
+    result = classify_locally("zip and send downloads")
+    assert result is not None
+    assert result.intent is IntentType.SEND_FOLDER
+    assert result.target == "downloads"
+
+
+def test_sending_a_named_file_is_still_send_file():
+    result = classify_locally("send me report.pdf")
+    assert result is not None
+    assert result.intent is IntentType.SEND_FILE
+    assert result.target == "report.pdf"

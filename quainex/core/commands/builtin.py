@@ -400,6 +400,14 @@ def build_commands(settings: Settings) -> list[Command]:
             message=f"Sending {path.name}.", data={"path": str(path), "name": path.name}
         )
 
+    async def send_folder(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        archive = ctx.desktop.zip_folder(_target(intent))
+        # Same shape as send_file: the bridge uploads whatever `data.path` names.
+        return CommandOutcome(
+            message=f"Zipping and sending {archive.name}.",
+            data={"path": str(archive), "name": archive.name},
+        )
+
     async def webcam(ctx: CommandContext, _intent: Intent) -> CommandOutcome:
         stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         destination = settings.screenshot_dir / f"quainex-webcam-{stamp}.jpg"
@@ -703,6 +711,13 @@ def build_commands(settings: Settings) -> list[Command]:
             intent=IntentType.SEND_FILE,
             summary="Send a file from this machine (over Telegram).",
             handler=send_file,
+            requires_target=True,
+            has_side_effect=False,
+        ),
+        Command(
+            intent=IntentType.SEND_FOLDER,
+            summary="Zip a folder and send it (over Telegram).",
+            handler=send_folder,
             requires_target=True,
             has_side_effect=False,
         ),

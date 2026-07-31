@@ -14,7 +14,13 @@ from typing import TYPE_CHECKING
 import pytest
 
 from quainex.config.settings import Settings
-from quainex.core.automation.desktop import FileHit, LevelChange, SystemSnapshot
+from quainex.core.automation.desktop import (
+    DirectoryEntry,
+    DirectoryListing,
+    FileHit,
+    LevelChange,
+    SystemSnapshot,
+)
 from quainex.core.brain import Intent, IntentType
 from quainex.core.commands import CommandStatus, build_executor
 from quainex.core.commands.base import Command, CommandContext, CommandOutcome
@@ -68,6 +74,27 @@ class FakeDesktopController:
         target = self._file_dir / f"{query.replace('/', '_')}.txt"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"fake file contents")
+        return target
+
+    def browse_roots(self) -> list[Path]:
+        self._record("browse_roots")
+        return [self._file_dir]
+
+    def list_directory(self, path: str, *, limit: int = 60) -> DirectoryListing:
+        self._record("list_directory", (path, limit))
+        return DirectoryListing(
+            path=path,
+            parent=None,
+            entries=[
+                DirectoryEntry(name="sub", path=f"{path}/sub", is_dir=True),
+                DirectoryEntry(name="a.txt", path=f"{path}/a.txt", is_dir=False, size_bytes=3),
+            ],
+        )
+
+    def zip_folder(self, query: str) -> Path:
+        self._record("zip_folder", query)
+        target = self._file_dir / f"{query.replace('/', '_').strip('/') or 'root'}.zip"
+        target.write_bytes(b"PK\x03\x04 fake zip")
         return target
 
     def save_incoming_file(
@@ -934,3 +961,17 @@ async def test_download_refuses_non_http_urls():
 
     with pytest.raises(CommandNotAllowedError, match="http"):
         await _download_url("file:///C:/Windows/System32/config/SAM")
+
+
+# -- sending a whole folder -----------------------------------------------
+
+
+async def test_send_folder_zips_and_returns_the_archive_path(tmp_path):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.SEND_FOLDER, target="work")
+    )
+    assert result.ok
+    assert any(c == ("zip_folder", "work") for c in desktop.calls)
+    # The archive path travels in data so the Telegram bridge can upload it.
+    assert (result.data or {}).get("path", "").endswith(".zip")

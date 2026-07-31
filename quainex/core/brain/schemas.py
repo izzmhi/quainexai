@@ -57,6 +57,7 @@ class IntentType(StrEnum):
     CREATE_FOLDER = "create_folder"
     SEARCH_FILES = "search_files"
     SEND_FILE = "send_file"
+    SEND_FOLDER = "send_folder"
 
     # --- System control ---
     LOCK_SCREEN = "lock_screen"
@@ -130,6 +131,10 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
     IntentType.SEND_FILE: (
         "Send a file from this machine to the person (over Telegram). target = the "
         "file name, or 'latest' for the most recent download."
+    ),
+    IntentType.SEND_FOLDER: (
+        "Zip a whole folder and send it (over Telegram). Use for 'send me my work "
+        "folder', 'zip and send downloads'. target = the folder name or path."
     ),
     IntentType.LOCK_SCREEN: "Lock the workstation. No target.",
     IntentType.SLEEP: "Put the machine to sleep. No target.",

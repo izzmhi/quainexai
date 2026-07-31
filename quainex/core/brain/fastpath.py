@@ -215,6 +215,15 @@ _SEND_FILE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:send|share|upload) (?:me )?(?:the )?file (?P<target>.+)$"),
 )
 
+#: "send me my work folder", "zip and send downloads". Checked before the file
+#: patterns, and the trailing/leading "folder" word is what distinguishes zipping a
+#: directory from sending a single file.
+_SEND_FOLDER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(?:send|share|upload)(?: me)? (?:my |the )?(?P<target>.+?) folder$"),
+    re.compile(r"^zip(?: up)?(?: and)? send (?:me )?(?:my |the )?(?P<target>.+)$"),
+    re.compile(r"^(?:send|share|zip)(?: me)? (?:the )?folder (?P<target>.+)$"),
+)
+
 #: Explicitly-named folders: "open the downloads folder", "open my documents".
 _FOLDER_PATTERN = re.compile(
     r"^(?:open|show|go to) (?:my |the )?(?P<target>[\w\s-]+?)(?: folder| directory)?$"
@@ -503,6 +512,12 @@ def classify_locally(utterance: str) -> IntentClassification | None:
             name = _CREATE_FOLDER_NOISE.sub("", match.group("target").strip()).strip()
             if name:
                 return _classification(IntentType.CREATE_FOLDER, name)
+
+    # Folders before single files: "send me my work folder" zips a directory, and
+    # the "folder" word is what separates it from "send me report.pdf".
+    for pattern in _SEND_FOLDER_PATTERNS:
+        if match := pattern.match(text):
+            return _classification(IntentType.SEND_FOLDER, match.group("target").strip())
 
     # Before file search, since "send me report.pdf" is a retrieval, not a query.
     for pattern in _SEND_FILE_PATTERNS:
