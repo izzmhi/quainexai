@@ -101,6 +101,14 @@ TELEGRAM_BLOCKED_INTENTS: frozenset[IntentType] = frozenset(
     }
 )
 
+#: Intents whose reply *always* discloses something from the machine, with no safe
+#: variant. Clipboard is deliberately not here: writing to it reveals nothing, and
+#: reading it is a per-owner choice (see ``_blocked_reason``), so its enforcement is
+#: dynamic rather than a flat membership test.
+_OUTPUT_REVEALING: frozenset[IntentType] = frozenset(
+    {IntentType.LOOK_AT_SCREEN, IntentType.READ_DOCUMENT}
+)
+
 #: Telegram rejects messages longer than 4096 characters.
 _MAX_MESSAGE_CHARS = 3900
 
@@ -572,6 +580,42 @@ class TelegramBridge:
 
     # -- handlers ----------------------------------------------------------
 
+    def _blocked_reason(self, intent: Intent) -> str | None:
+        """Why an intent must not run over Telegram, or ``None`` if it may.
+
+        The test is about the *reply*: does the text sent back carry something that
+        was on the machine? Reading the clipboard, the screen, or a document does;
+        copying *to* the clipboard does not. So:
+
+        * a clipboard **write** is always allowed — nothing leaves the machine;
+        * a clipboard **read** is allowed only when the owner has opted in, because
+          the clipboard often holds a password just copied and Telegram is not
+          end-to-end encrypted;
+        * the two genuinely output-revealing intents stay off entirely.
+
+        Args:
+            intent: The classified intent.
+
+        Returns:
+            A message explaining the refusal, or ``None`` to proceed.
+        """
+        if intent.intent is IntentType.CLIPBOARD:
+            action = intent.parameters_as_dict().get("action", "read").lower()
+            if action == "write" or self._settings.telegram_allow_clipboard_read:
+                return None
+            return (
+                "Reading the clipboard is kept off Telegram by default — it can hold a "
+                "password you just copied, and Telegram is not end-to-end encrypted.\n\n"
+                "To copy something TO your PC, say:\n  copy this to my PC: your text\n\n"
+                "To allow reading it here, set QUAINEX_TELEGRAM_ALLOW_CLIPBOARD_READ=true."
+            )
+        if intent.intent in _OUTPUT_REVEALING:
+            return (
+                f"{intent.intent.value} is disabled over Telegram because its output "
+                "would leave your machine. Use the local API for that one."
+            )
+        return None
+
     async def _handle_text(self, client: httpx.AsyncClient, chat_id: int, text: str) -> None:
         """Handle a text message.
 
@@ -601,13 +645,9 @@ class TelegramBridge:
             history = await self._memory.conversation_context() if self._memory else None
             intent = await self._brain.interpret(command, history=history)
 
-            if intent.intent in TELEGRAM_BLOCKED_INTENTS:
-                await self._send(
-                    client,
-                    chat_id,
-                    f"`{intent.intent.value}` is disabled over Telegram because its output "
-                    "would leave your machine. Use the local API for that one.",
-                )
+            reason = self._blocked_reason(intent)
+            if reason is not None:
+                await self._send(client, chat_id, reason)
                 return
 
             result = await self._commands.execute(intent)

@@ -520,6 +520,22 @@ def test_copy_to_pc_becomes_set_clipboard_with_exact_text():
     assert result.target == "Hello, World!"
 
 
+@pytest.mark.parametrize(
+    ("said", "target"),
+    [
+        ("copy hello world to clipboard", "hello world"),
+        ("put my note on the clipboard", "my note"),
+        ("set clipboard to done", "done"),
+    ],
+)
+def test_clipboard_writes_reach_set_clipboard_however_phrased(said: str, target: str):
+    """Whichever way "put this on my clipboard" is said, it writes — never blocked."""
+    result = classify_locally(said)
+    assert result is not None
+    assert result.intent is IntentType.SET_CLIPBOARD
+    assert result.target == target
+
+
 def test_type_command_keeps_case_and_punctuation():
     result = classify_locally("type Buy milk & eggs.")
     assert result is not None

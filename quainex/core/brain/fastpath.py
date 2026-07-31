@@ -236,13 +236,21 @@ _FOLDER_PATTERN = re.compile(
 #: the verb be capitalised; DOTALL lets the content span lines. The target group is
 #: taken verbatim.
 _SET_CLIPBOARD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # Destination first: "copy this to my PC: <text>", "paste onto clipboard <text>".
     re.compile(
         r"^(?:copy|paste)\s+(?:this|that|the following)?\s*(?:onto|into|on|to)?\s*"
-        r"(?:my\s+)?(?:pc|computer|laptop|clipboard)\s*[:\-]?\s*(?P<target>.+)$",
+        r"(?:my\s+|the\s+)?(?:pc|computer|laptop|clipboard)\s*[:\-]?\s*(?P<target>.+)$",
         re.IGNORECASE | re.DOTALL,
     ),
+    # "set/change (my) clipboard to <text>".
     re.compile(
         r"^(?:set|change)\s+(?:my\s+)?clipboard\s+(?:contents\s+)?to\s*[:\-]?\s*(?P<target>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # Destination last: "copy <text> to the clipboard", "put <text> on my PC".
+    re.compile(
+        r"^(?:copy|put|paste)\s+(?P<target>.+?)\s+(?:to|onto|on|into)\s+"
+        r"(?:my\s+|the\s+)?(?:pc|computer|laptop|clipboard)$",
         re.IGNORECASE | re.DOTALL,
     ),
 )

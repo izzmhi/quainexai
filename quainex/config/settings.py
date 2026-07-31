@@ -326,6 +326,16 @@ class Settings(BaseSettings):
     # inbound files entirely.
     telegram_receive_files: bool = True
 
+    # Allow *reading* the clipboard over Telegram.
+    #
+    # Off by default, and only reading is gated: copying something *to* the PC
+    # clipboard from the phone is always allowed (nothing leaves the machine).
+    # Reading is different — the reply carries whatever is on the clipboard into a
+    # non-end-to-end-encrypted chat, and that is often a password you just copied.
+    # It is the owner's call, so it is a setting rather than a hard refusal; set it
+    # true to read the clipboard from Telegram.
+    telegram_allow_clipboard_read: bool = False
+
     # Send a short "online" ping to the allowed users when the bridge starts.
     #
     # On by default: the whole reason to run over Telegram is that the machine is

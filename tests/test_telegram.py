@@ -382,6 +382,43 @@ def test_output_revealing_intents_are_blocked():
     assert IntentType.READ_DOCUMENT in TELEGRAM_BLOCKED_INTENTS
 
 
+def _clipboard_intent(action: str) -> Intent:
+    from quainex.core.brain.schemas import IntentParameter
+
+    return Intent(
+        intent=IntentType.CLIPBOARD,
+        target="hello" if action == "write" else None,
+        confidence=1.0,
+        reasoning="test",
+        requires_confirmation=False,
+        parameters=[IntentParameter(key="action", value=action)],
+    )
+
+
+def test_writing_the_clipboard_is_never_blocked(tmp_path):
+    """Copying TO the PC reveals nothing, so it must go through over Telegram."""
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    assert bridge._blocked_reason(_clipboard_intent("write")) is None
+
+
+def test_reading_the_clipboard_is_blocked_by_default_with_a_helpful_message(tmp_path):
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    reason = bridge._blocked_reason(_clipboard_intent("read"))
+    assert reason is not None
+    # It points the user at the thing that does work, rather than a flat refusal.
+    assert "copy this to my PC" in reason
+
+
+def test_reading_the_clipboard_can_be_enabled_by_the_owner(tmp_path):
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_allow_clipboard_read=True,
+    )
+    assert bridge._blocked_reason(_clipboard_intent("read")) is None
+
+
 class PhotoRecorder(SendRecorder):
     """Also records photo uploads, so a test can prove what actually left.
 
