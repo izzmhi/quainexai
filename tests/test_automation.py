@@ -16,7 +16,10 @@ from quainex.core.automation.applications import (
     known_application_names,
     resolve_application,
 )
-from quainex.core.automation.windows import WindowsDesktopController
+from quainex.core.automation.windows import (
+    WindowsDesktopController,
+    _safe_filename,
+)
 from quainex.core.exceptions import CommandExecutionError, CommandNotAllowedError
 
 # -- application allowlist -------------------------------------------------
@@ -145,6 +148,63 @@ def test_bare_domain_is_upgraded_to_https(controller, monkeypatch):
 
     assert opened == ["https://example.com"], "bare domains must not default to http"
     assert "example.com" in message
+
+
+# -- receiving files: containment, no overwrite, sanitised names -----------
+
+
+def test_a_received_file_is_saved_inside_the_root(controller, tmp_path):
+    dest = tmp_path / "incoming"
+    saved = controller.save_incoming_file(b"hello", suggested_name="note.txt", location=str(dest))
+    assert saved == dest / "note.txt"
+    assert saved.read_bytes() == b"hello"
+
+
+def test_a_received_file_never_overwrites_an_existing_one(controller, tmp_path):
+    dest = tmp_path / "incoming"
+    first = controller.save_incoming_file(b"one", suggested_name="note.txt", location=str(dest))
+    second = controller.save_incoming_file(b"two", suggested_name="note.txt", location=str(dest))
+    assert first.name == "note.txt"
+    assert second.name == "note (1).txt"
+    assert first.read_bytes() == b"one"
+    assert second.read_bytes() == b"two"
+
+
+def test_a_hostile_file_name_cannot_climb_out_of_the_folder(controller, tmp_path):
+    dest = tmp_path / "incoming"
+    saved = controller.save_incoming_file(
+        b"x", suggested_name="..\\..\\evil.exe", location=str(dest)
+    )
+    # Only the final component survives, so it lands inside the folder, not above it.
+    assert saved.parent == dest
+    assert saved.name == "evil.exe"
+
+
+def test_saving_outside_the_permitted_roots_is_refused(controller):
+    with pytest.raises(CommandNotAllowedError, match="outside the folders"):
+        controller.save_incoming_file(b"x", suggested_name="a.txt", location="C:/Windows")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("report.pdf", "report.pdf"),
+        ("../../etc/passwd", "passwd"),
+        ("a\\b\\c.doc", "c.doc"),
+        ('bad:name?.txt', "bad_name_.txt"),
+    ],
+)
+def test_file_names_are_reduced_to_a_bare_safe_name(raw, expected):
+    assert _safe_filename(raw) == expected
+
+
+def test_a_reserved_device_name_is_defused():
+    assert _safe_filename("CON").startswith("_")
+
+
+def test_an_empty_or_dotted_name_falls_back(controller):
+    assert _safe_filename("///").startswith("file-")
+    assert _safe_filename("...").startswith("file-")
 
 
 def test_an_application_not_installed_anywhere_is_reported_clearly(controller):

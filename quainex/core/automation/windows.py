@@ -211,6 +211,77 @@ def resolve_known_folder(name: str) -> Path | None:
     return Path(value) if result == 0 and value else None
 
 
+#: Characters Windows forbids in a file name, plus the separators. Any of these in
+#: a sender-supplied name is replaced, so nothing in it can traverse or break.
+_UNSAFE_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+#: Windows reserved device names — a file literally called ``CON`` or ``NUL`` is not
+#: creatable, so a name that reduces to one of these is prefixed.
+_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+#: Cap on a saved file name, leaving room for a de-duplication suffix under the
+#: Windows path limits.
+_MAX_NAME_LENGTH = 200
+
+
+def _safe_filename(name: str) -> str:
+    """Reduce a sender-supplied file name to a safe, bare file name.
+
+    Keeps only the final path component, strips reserved characters and leading
+    dots, avoids the Windows device names, and bounds the length. The result has no
+    separators, so joining it to a folder cannot escape that folder.
+
+    Args:
+        name: The sender's file name.
+
+    Returns:
+        A safe file name, never empty.
+    """
+    # Only the last component: a name like "../../etc/passwd" or "a\\b.txt" loses
+    # everything before the final separator.
+    base = re.split(r"[\\/]", name.strip())[-1]
+    base = _UNSAFE_NAME_CHARS.sub("_", base).strip().strip(".").strip()
+    if not base:
+        base = f"file-{time.strftime('%Y%m%d-%H%M%S')}"
+
+    stem = Path(base).stem
+    if stem.lower() in _RESERVED_NAMES:
+        base = f"_{base}"
+
+    if len(base) > _MAX_NAME_LENGTH:
+        suffix = Path(base).suffix[:20]
+        base = base[: _MAX_NAME_LENGTH - len(suffix)] + suffix
+    return base
+
+
+def _dedupe(target: Path) -> Path:
+    """Return a path that does not exist, suffixing the name until it is free.
+
+    ``report.pdf`` becomes ``report (1).pdf`` when the first is taken, and so on.
+    Never overwrites, and gives up after a bounded number of attempts rather than
+    looping forever on a pathological directory.
+
+    Args:
+        target: The desired path.
+
+    Returns:
+        A non-existent path in the same folder.
+    """
+    if not target.exists():
+        return target
+    stem, suffix, parent = target.stem, target.suffix, target.parent
+    for index in range(1, 10000):
+        candidate = parent / f"{stem} ({index}){suffix}"
+        if not candidate.exists():
+            return candidate
+    # Astronomically unlikely; fall back to a timestamp so the save still succeeds.
+    return parent / f"{stem} ({time.strftime('%Y%m%d-%H%M%S')}){suffix}"
+
+
 def _app_paths_executable(needle: str) -> Path | None:
     """Look up an executable in the Windows ``App Paths`` registry.
 
@@ -633,6 +704,75 @@ class WindowsDesktopController:
         if match is None:
             raise CommandExecutionError(f"No file matching '{needle}' was found in your folders.")
         return match
+
+    def save_incoming_file(
+        self, data: bytes, *, suggested_name: str, location: str | None
+    ) -> Path:
+        """Save bytes received over Telegram into a permitted folder.
+
+        The destination is resolved through the same known-folder machinery as
+        everything else and confined to the permitted roots, so a caption can name
+        "documents/reports" but never "C:/Windows". The sender's file name is
+        reduced to a bare, sanitised name — no separators, no reserved characters,
+        no leading dots — so nothing in it can redirect the write. An existing file
+        is never overwritten: a collision gets a " (1)", " (2)"… suffix, because a
+        remote save silently clobbering a local file is the kind of surprise this
+        project is at pains to avoid.
+
+        Args:
+            data: The file's bytes.
+            suggested_name: The sender's file name, used as a starting point.
+            location: A known-folder word or sub-path, or ``None`` for the inbox.
+
+        Returns:
+            The path actually written.
+
+        Raises:
+            CommandNotAllowedError: The destination escapes the permitted roots.
+            CommandExecutionError: The folder or file could not be written.
+        """
+        folder = self._resolve_incoming_folder(location)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CommandExecutionError(f"Could not open '{folder}': {exc}") from exc
+
+        target = _dedupe(folder / _safe_filename(suggested_name))
+        # Re-check containment after joining the (sanitised) name and de-duplicating:
+        # the name is already stripped of separators, but the guarantee is worth
+        # making unconditionally rather than trusting the sanitiser.
+        self._contain(target.resolve())
+
+        try:
+            target.write_bytes(data)
+        except OSError as exc:
+            raise CommandExecutionError(f"Could not save '{target.name}': {exc}") from exc
+
+        _log.info("incoming_file_saved", path=str(target), bytes=len(data))
+        return target
+
+    def _resolve_incoming_folder(self, location: str | None) -> Path:
+        """Resolve where a received file should be saved, contained to the roots.
+
+        A named location reuses the folder resolver ("downloads",
+        "documents/reports"); no location falls back to a tidy ``Downloads/Quainex``
+        inbox, so files sent without instructions still land somewhere obvious
+        rather than scattering.
+
+        Args:
+            location: A known-folder word or sub-path, or ``None``.
+
+        Returns:
+            The contained destination folder (not yet created).
+
+        Raises:
+            CommandNotAllowedError: The location escapes the permitted roots.
+        """
+        if location and location.strip():
+            return self._resolve_folder(location)
+
+        downloads = resolve_known_folder("downloads") or Path.home()
+        return self._contain((downloads / "Quainex").resolve())
 
     def search_files(self, query: str, limit: int) -> list[FileHit]:
         """Find files whose name contains ``query`` under the permitted roots.

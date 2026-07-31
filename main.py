@@ -32,12 +32,18 @@ def main() -> None:
 
     # log_config=None hands logging to our own structlog pipeline; uvicorn's
     # default dictConfig would otherwise replace the handlers we installed.
+    #
+    # reload is an explicit opt-in (QUAINEX_RELOAD=true), not something tied to the
+    # environment. The always-on autostart must be a single process: uvicorn's
+    # reloader runs a supervisor *and* a worker, and two of those pairs — one from
+    # the autostart, one from a manual launch — is how two Telegram bridges ended
+    # up fighting over one bot token. Off by default keeps production single-process.
     uvicorn.run(
         "quainex.api.app:create_app",
         factory=True,
         host=settings.host,
         port=settings.port,
-        reload=not settings.is_production,
+        reload=settings.reload,
         log_config=None,
     )
 

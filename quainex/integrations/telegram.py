@@ -120,6 +120,10 @@ _MAX_PHOTO_BYTES = 10 * 1024 * 1024
 #: The Bot API caps ``sendDocument`` at 50 MB.
 _MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 
+#: The Bot API only lets a bot *download* files up to 20 MB via ``getFile``. A file
+#: larger than this cannot be fetched at all, so it is reported rather than attempted.
+_MAX_INCOMING_BYTES = 20 * 1024 * 1024
+
 #: How often to re-send the "typing…" action. Telegram's lasts about five seconds;
 #: four keeps it continuous without hammering the API.
 _TYPING_REFRESH_SECONDS = 4.0
@@ -154,6 +158,10 @@ class TelegramUpdate(BaseModel):
         user_id: The sender's Telegram user id, checked against the allowlist.
         text: Message text, when it was a text message.
         voice_file_id: File id of a voice note, when it was one.
+        file_id: File id of an attached document/photo/video/audio to save.
+        file_name: The sender's name for that attachment, when known.
+        file_size: The attachment's size in bytes, when known.
+        caption: The text sent alongside an attachment — the save instruction.
         callback_data: Data from a tapped inline button.
         callback_id: Id needed to acknowledge a button tap.
     """
@@ -163,6 +171,10 @@ class TelegramUpdate(BaseModel):
     user_id: int | None = None
     text: str | None = None
     voice_file_id: str | None = None
+    file_id: str | None = None
+    file_name: str | None = None
+    file_size: int | None = None
+    caption: str | None = None
     callback_data: str | None = None
     callback_id: str | None = None
 
@@ -482,6 +494,8 @@ class TelegramBridge:
                 await self._handle_button(client, update)
             elif update.voice_file_id:
                 await self._handle_voice(client, update)
+            elif update.file_id:
+                await self._handle_incoming_file(client, update)
             elif update.text:
                 await self._handle_text(client, update.chat_id, update.text)
         except QuainexError as exc:
@@ -815,6 +829,82 @@ class TelegramBridge:
         # Voice notes are addressed by being sent, so the wake word is redundant.
         await self._handle_text(client, update.chat_id, transcript.text)
 
+    async def _handle_incoming_file(
+        self, client: httpx.AsyncClient, update: TelegramUpdate
+    ) -> None:
+        """Save a file the user attached, at the location their caption names.
+
+        The caption is the instruction: "save to downloads", "documents/reports as
+        budget.xlsx", or nothing at all — in which case the file lands in a tidy
+        ``Downloads/Quainex`` inbox. All the safety lives one layer down, in the
+        controller: the destination is confined to the permitted roots, the name is
+        sanitised, and an existing file is never overwritten. The bridge's job is
+        only to fetch the bytes and report where they went.
+
+        Args:
+            client: HTTP client.
+            update: The update carrying the attachment.
+        """
+        assert update.chat_id is not None  # noqa: S101 - checked by the caller
+        if not self._settings.telegram_receive_files:
+            await self._send(
+                client,
+                update.chat_id,
+                "Saving files sent over Telegram is turned off "
+                "(QUAINEX_TELEGRAM_RECEIVE_FILES=false).",
+            )
+            return
+
+        size = update.file_size or 0
+        if size > _MAX_INCOMING_BYTES:
+            await self._send(
+                client,
+                update.chat_id,
+                f"That file is {size // 1024 // 1024} MB. Telegram only lets a bot "
+                f"download files up to {_MAX_INCOMING_BYTES // 1024 // 1024} MB, so I "
+                "cannot save it. Send it split up, or copy it over another way.",
+            )
+            return
+
+        location, rename = _parse_save_caption(update.caption)
+        suggested = rename or update.file_name or f"file-{time.strftime('%Y%m%d-%H%M%S')}"
+
+        # Downloading and writing can take a moment for a larger file; show activity.
+        async with self._typing(client, update.chat_id):
+            try:
+                file_response = await client.get(
+                    f"{self._url()}/getFile", params={"file_id": update.file_id}
+                )
+                file_response.raise_for_status()
+                remote_path = file_response.json()["result"]["file_path"]
+
+                download = await client.get(
+                    f"{_API_ROOT}/file/bot{self._token()}/{remote_path}", timeout=180
+                )
+                download.raise_for_status()
+            except httpx.HTTPError as exc:
+                _log.warning("telegram_incoming_download_failed", error=str(exc))
+                await self._send(
+                    client, update.chat_id, "I could not download that file from Telegram."
+                )
+                return
+
+            saved = self._commands.context.desktop.save_incoming_file(
+                download.content, suggested_name=suggested, location=location
+            )
+
+        renamed = (
+            ""
+            if saved.name == suggested
+            else f"\n(named {saved.name} — the folder already had one)"
+        )
+        await self._send(
+            client,
+            update.chat_id,
+            f"💾 <b>Saved</b>\n<code>{_esc(str(saved))}</code>{_esc(renamed)}",
+            parse_mode="HTML",
+        )
+
     async def _builtin(self, command: str) -> str:
         """Answer a slash command locally, without the model.
 
@@ -1094,7 +1184,9 @@ _HELP = (
     "• <code>open downloads</code> · <code>open desktop</code>\n"
     "• <code>create a folder called work</code>\n"
     "• <code>find report.pdf</code>\n"
-    "• <code>send me my latest download</code>\n\n"
+    "• <code>send me my latest download</code>\n"
+    "• <b>Attach any file</b> with a caption like "
+    "<code>save to documents as report.pdf</code> — I'll save it here\n\n"
     "🛡 <b>Security &amp; location</b>\n"
     "• <code>panic</code> — lock, photo &amp; locate, sent to you\n"
     "• <code>where is my laptop</code>\n"
@@ -1198,10 +1290,89 @@ def _parse_update(raw: dict[str, Any]) -> TelegramUpdate:
 
     message = raw.get("message") or raw.get("edited_message") or {}
     voice = message.get("voice") or {}
+    attachment = _attachment(message)
     return TelegramUpdate(
         update_id=update_id,
         chat_id=message.get("chat", {}).get("id"),
         user_id=message.get("from", {}).get("id"),
         text=message.get("text"),
         voice_file_id=voice.get("file_id"),
+        file_id=attachment.get("file_id"),
+        file_name=attachment.get("file_name"),
+        file_size=attachment.get("file_size"),
+        caption=message.get("caption"),
     )
+
+
+def _attachment(message: dict[str, Any]) -> dict[str, Any]:
+    """Extract a savable attachment from a message, whatever kind it is.
+
+    Telegram carries a document, a photo, a video and an audio clip in different
+    shapes: a document is an object with a name, a photo is an array of sizes with
+    none. This reduces all of them to ``file_id`` / ``file_name`` / ``file_size``,
+    inventing a sensible name and extension for the kinds that arrive without one so
+    a photo saves as a ``.jpg`` rather than a mystery blob.
+
+    A voice note is deliberately excluded: those are transcribed as commands, not
+    saved as files.
+
+    Args:
+        message: The Telegram message object.
+
+    Returns:
+        The attachment fields, or an empty dict when there is nothing to save.
+    """
+    if document := message.get("document"):
+        return {
+            "file_id": document.get("file_id"),
+            "file_name": document.get("file_name"),
+            "file_size": document.get("file_size"),
+        }
+    if photos := message.get("photo"):
+        # An array of the same image at increasing sizes; the last is the largest.
+        largest = photos[-1]
+        return {
+            "file_id": largest.get("file_id"),
+            "file_name": f"photo-{time.strftime('%Y%m%d-%H%M%S')}.jpg",
+            "file_size": largest.get("file_size"),
+        }
+    for kind, extension in (("video", ".mp4"), ("audio", ".mp3")):
+        if media := message.get(kind):
+            return {
+                "file_id": media.get("file_id"),
+                "file_name": media.get("file_name")
+                or f"{kind}-{time.strftime('%Y%m%d-%H%M%S')}{extension}",
+                "file_size": media.get("file_size"),
+            }
+    return {}
+
+
+def _parse_save_caption(caption: str | None) -> tuple[str | None, str | None]:
+    """Read a save instruction from an attachment's caption.
+
+    Understands "save to downloads", "documents/reports", "keep this in documents as
+    budget.xlsx", or nothing. Returns the location (or ``None`` for the default
+    inbox) and an optional new name from an "as <name>" clause.
+
+    Args:
+        caption: The caption sent with the file.
+
+    Returns:
+        ``(location, rename)``.
+    """
+    text = (caption or "").strip()
+    if not text:
+        return None, None
+
+    rename: str | None = None
+    if match := re.search(r"\bas\s+(.+)$", text, re.IGNORECASE):
+        rename = match.group(1).strip().strip("\"'") or None
+        text = text[: match.start()].strip()
+
+    # Peel off the leading verbs and prepositions, so "please save this to
+    # downloads" and "downloads" both reduce to the location "downloads".
+    text = re.sub(r"^(please\s+)?(save|store|put|keep|download|drop)\b", "", text, flags=re.I)
+    text = re.sub(r"^\s*(it|this|that|the file|here)\b", "", text.strip(), flags=re.I)
+    text = re.sub(r"^\s*(to|in|into|inside|on|at|under)\b", "", text.strip(), flags=re.I)
+    location = text.strip().strip("/\\").strip() or None
+    return location, rename

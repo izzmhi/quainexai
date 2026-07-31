@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     # --- HTTP server -----------------------------------------------------
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    # Auto-reload the server when source files change. This is a *development*
+    # convenience, and it is off by default on purpose: uvicorn's reloader runs
+    # two processes — a file-watching supervisor and the worker that actually
+    # serves — and the always-on autostart must be a single process. Two
+    # independent launches each spawning a reloader pair is precisely what made
+    # two Telegram bridges fight over one bot token (409 Conflict). Set
+    # QUAINEX_RELOAD=true only when you are editing code and want live reload.
+    reload: bool = False
 
     # --- Logging ---------------------------------------------------------
     log_level: LogLevel = LogLevel.INFO
@@ -305,6 +313,18 @@ class Settings(BaseSettings):
     # confined to ``command_search_roots`` and size-limited, so it can never become
     # "send me any file on the disk".
     telegram_send_files: bool = True
+
+    # Accept files sent *to* the bot and save them on this machine.
+    #
+    # On by default: this is inbound — you attach a file in the chat and it lands
+    # in a folder you name. The safety is the same structural containment as
+    # everything else: the destination is resolved through the known-folder API
+    # and confined to ``command_search_roots``, the sender's file name is
+    # sanitised so it cannot traverse out, and an existing file is never
+    # overwritten (a colliding name gets a numeric suffix). Telegram itself caps
+    # what a bot may download at 20 MB, which bounds the size. Set false to refuse
+    # inbound files entirely.
+    telegram_receive_files: bool = True
 
     # --- Plugins (Phase 9) ------------------------------------------------
     # Where plugins are looked for. Relative paths resolve to the repo root.

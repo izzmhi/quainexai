@@ -676,3 +676,141 @@ def test_escaping_and_the_plain_text_fallback_round_trip():
     """
     assert _esc("Rock & <Roll>") == "Rock &amp; &lt;Roll&gt;"
     assert _plain("<b>Up</b> 2h &amp; ticking") == "Up 2h & ticking"
+
+
+# -- receiving files: save what is sent, where it is told ------------------
+
+
+class _FileResponse:
+    """A successful Telegram response carrying either JSON or file bytes."""
+
+    status_code = 200
+
+    def __init__(self, *, json_body: dict[str, object] | None = None, content: bytes = b"") -> None:
+        self._json = json_body or {"ok": True, "result": {}}
+        self.content = content
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self._json
+
+
+class IncomingFileClient(SendRecorder):
+    """Serves getFile + the file download, and records outbound messages."""
+
+    def __init__(self, payload: bytes = b"the bytes") -> None:
+        super().__init__()
+        self._payload = payload
+
+    async def get(self, url: str, **_: object) -> _FileResponse:
+        if "/getFile" in url:
+            return _FileResponse(json_body={"ok": True, "result": {"file_path": "docs/x.bin"}})
+        return _FileResponse(content=self._payload)
+
+
+def _document_update(caption: str | None, *, size: int = 12, name: str = "note.txt") -> object:
+    return _parse_update(
+        {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 7},
+                "from": {"id": ALLOWED_USER},
+                "caption": caption,
+                "document": {"file_id": "F1", "file_name": name, "file_size": size},
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("caption", "location", "rename"),
+    [
+        (None, None, None),
+        ("save to downloads", "downloads", None),
+        ("documents/reports", "documents/reports", None),
+        ("please save this in documents as budget.xlsx", "documents", "budget.xlsx"),
+        ("save as report.pdf", None, "report.pdf"),
+        ("keep it under desktop/work", "desktop/work", None),
+    ],
+)
+def test_a_save_caption_is_read_into_a_location_and_a_name(caption, location, rename):
+    from quainex.integrations.telegram import _parse_save_caption
+
+    assert _parse_save_caption(caption) == (location, rename)
+
+
+def test_an_attachment_is_recognised_whatever_its_kind():
+    from quainex.integrations.telegram import _attachment
+
+    doc = _attachment({"document": {"file_id": "D", "file_name": "a.pdf", "file_size": 3}})
+    assert doc == {"file_id": "D", "file_name": "a.pdf", "file_size": 3}
+
+    photo = _attachment({"photo": [{"file_id": "small"}, {"file_id": "big", "file_size": 9}]})
+    assert photo["file_id"] == "big"  # the largest size, not the first
+    assert photo["file_name"].endswith(".jpg")
+
+    assert _attachment({"text": "hello"}) == {}
+
+
+async def test_a_sent_file_is_saved_where_the_caption_says(tmp_path):
+    """The whole feature: attach a file, name a place, it lands there."""
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = IncomingFileClient(payload=b"real bytes")
+
+    await bridge._dispatch(
+        client,  # type: ignore[arg-type]
+        _document_update("save to documents as report.pdf"),
+    )
+
+    # The controller was asked to save the downloaded bytes at the named place.
+    saves = [c for c in desktop.calls if c[0] == "save_incoming_file"]
+    assert saves == [("save_incoming_file", ("report.pdf", "documents", len(b"real bytes")))]
+    # And the chat is told where it went.
+    assert any("Saved" in message for message in client.sent)
+
+
+async def test_receiving_files_can_be_turned_off(tmp_path):
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_receive_files=False,
+    )
+    client = IncomingFileClient()
+
+    await bridge._dispatch(client, _document_update("save to downloads"))  # type: ignore[arg-type]
+
+    assert not any(c[0] == "save_incoming_file" for c in desktop.calls)
+    assert any("turned off" in message for message in client.sent)
+
+
+async def test_a_file_too_big_to_download_is_reported_not_attempted(tmp_path):
+    """Telegram only lets a bot download up to 20 MB; a bigger one is explained."""
+    from quainex.integrations.telegram import _MAX_INCOMING_BYTES
+
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = IncomingFileClient()
+
+    await bridge._dispatch(  # type: ignore[arg-type]
+        client,
+        _document_update("save to downloads", size=_MAX_INCOMING_BYTES + 1),
+    )
+
+    assert not any(c[0] == "save_incoming_file" for c in desktop.calls)
+    assert any("MB" in message for message in client.sent)

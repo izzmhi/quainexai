@@ -21,6 +21,14 @@ def test_defaults_are_development_and_local_only():
     assert settings.is_production is False
 
 
+def test_reload_is_off_by_default():
+    # The always-on autostart must be a single process. uvicorn's reloader runs a
+    # supervisor plus a worker, and two such pairs is how two Telegram bridges came
+    # to fight over one bot token. So reload is an explicit opt-in, even in dev.
+    assert _make().reload is False
+    assert _make(reload=True).reload is True
+
+
 def test_production_forces_debug_off():
     # Even when an operator explicitly sets debug, production must win.
     settings = _make(environment="prod", debug=True)

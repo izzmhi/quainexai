@@ -109,6 +109,19 @@ class DesktopController(Protocol):
         """Find a single file, within permitted roots, to send off the machine."""
         ...
 
+    def save_incoming_file(
+        self, data: bytes, *, suggested_name: str, location: str | None
+    ) -> Path:
+        """Save a file received over Telegram into a permitted folder.
+
+        ``location`` is a known-folder word or sub-path ("downloads",
+        "documents/reports"), or ``None`` for the default inbox. ``suggested_name``
+        is the sender's file name; it is sanitised and can never traverse out of the
+        chosen folder. An existing file is never overwritten. Returns the path
+        written.
+        """
+        ...
+
     # --- Session and power ---
     def lock_screen(self) -> str:
         """Lock the workstation."""

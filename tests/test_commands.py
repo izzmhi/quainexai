@@ -70,6 +70,18 @@ class FakeDesktopController:
         target.write_bytes(b"fake file contents")
         return target
 
+    def save_incoming_file(
+        self, data: bytes, *, suggested_name: str, location: str | None
+    ) -> Path:
+        self._record("save_incoming_file", (suggested_name, location, len(data)))
+        # Write it somewhere real, under a folder named for the requested location,
+        # so a test can assert both the bytes and where they were routed.
+        folder = self._file_dir / (location or "inbox").replace("/", "_")
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / suggested_name
+        target.write_bytes(data)
+        return target
+
     def lock_screen(self) -> str:
         return self._record("lock_screen")
 
