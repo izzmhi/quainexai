@@ -54,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import socket
 import tempfile
 import time
 from pathlib import Path
@@ -62,7 +63,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from pydantic import BaseModel
 
-from quainex.core.brain import IntentType
+from quainex.core.brain import Intent, IntentType
 from quainex.core.commands import CommandStatus
 from quainex.core.commands.base import CommandResult
 from quainex.core.exceptions import ProviderError, QuainexError
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from quainex.config.settings import Settings
-    from quainex.core.brain import Brain, Intent
+    from quainex.core.brain import Brain
     from quainex.core.commands import CommandExecutor
     from quainex.core.memory import MemoryManager
     from quainex.core.voice import VoiceSession
@@ -146,6 +147,23 @@ _ALWAYS_SEND_IMAGE: frozenset[IntentType] = frozenset({IntentType.PANIC}) | _BRO
 #: Every intent whose successful result carries an image to upload.
 _IMAGE_INTENTS: frozenset[IntentType] = (
     frozenset({IntentType.SCREENSHOT, IntentType.WEBCAM}) | _ALWAYS_SEND_IMAGE
+)
+
+#: Quick-action buttons for /menu that map to a one-shot intent. The two report
+#: actions (status, wifi) are handled separately because they render text directly
+#: rather than running an intent. ``callback_data`` carries "do:<key>".
+_MENU_ACTION_INTENTS: dict[str, tuple[IntentType, str | None]] = {
+    "screenshot": (IntentType.SCREENSHOT, None),
+    "lock": (IntentType.LOCK_SCREEN, None),
+    "pause": (IntentType.MEDIA_CONTROL, "pause"),
+    "next": (IntentType.MEDIA_CONTROL, "next"),
+}
+
+#: The /menu keyboard layout, as rows of (label, action-key).
+_MENU_LAYOUT: tuple[tuple[tuple[str, str], ...], ...] = (
+    (("📸 Screenshot", "screenshot"), ("🔒 Lock", "lock")),
+    (("⏯ Pause", "pause"), ("⏭ Next", "next")),
+    (("📊 Status", "status"), ("📶 Wi-Fi", "wifi")),
 )
 
 
@@ -280,6 +298,7 @@ class TelegramBridge:
 
         async with httpx.AsyncClient(timeout=_POLL_TIMEOUT_SECONDS + 10) as client:
             await self._register_commands(client)
+            await self._announce_online(client)
             while self._running:
                 try:
                     for update in await self._poll(client):
@@ -340,6 +359,7 @@ class TelegramBridge:
                 f"{self._url()}/setMyCommands",
                 json={
                     "commands": [
+                        {"command": "menu", "description": "Quick-action buttons"},
                         {"command": "help", "description": "Everything Quainex can do"},
                         {"command": "status", "description": "A live snapshot of this machine"},
                         {"command": "start", "description": "Welcome and a few examples"},
@@ -351,6 +371,24 @@ class TelegramBridge:
             # Registering the menu must never jeopardise the poll loop; any failure
             # here is cosmetic, so every exception type is caught, not just HTTP ones.
             _log.warning("telegram_setmycommands_failed", error=str(exc))
+
+    async def _announce_online(self, client: httpx.AsyncClient) -> None:
+        """Ping the allowed users once, to say the machine is back.
+
+        The point of a phone bridge is that the machine is somewhere you are not, so
+        it coming back — after a reboot, a crash, or a restart — is worth exactly one
+        line. In a private chat the chat id is the user id, so each allowed user is
+        messaged directly. Best-effort, like every other courtesy here.
+
+        Args:
+            client: HTTP client.
+        """
+        if not self._settings.telegram_startup_ping:
+            return
+        host = _esc(socket.gethostname())
+        text = f"🟢 <b>Quainex is online</b>\n{host} · {time.strftime('%H:%M')}"
+        for user_id in self._settings.telegram_allowed_users:
+            await self._send(client, user_id, text, parse_mode="HTML")
 
     async def diagnose(self) -> dict[str, object]:
         """Check the token against Telegram and report who has messaged the bot.
@@ -523,6 +561,9 @@ class TelegramBridge:
         """
         command = text.strip()
         if command.startswith("/"):
+            if command.split()[0].lower() == "/menu":
+                await self._send_menu(client, chat_id)
+                return
             await self._send(client, chat_id, await self._builtin(command), parse_mode="HTML")
             return
 
@@ -549,6 +590,27 @@ class TelegramBridge:
             if self._memory is not None:
                 await self._memory.remember_exchange(command, intent, result)
 
+        await self._deliver(client, chat_id, intent, result)
+
+    async def _deliver(
+        self,
+        client: httpx.AsyncClient,
+        chat_id: int,
+        intent: Intent,
+        result: CommandResult,
+    ) -> None:
+        """Send the outcome of an intent: a confirmation, or the reply and any media.
+
+        Shared by typed requests and quick-action buttons so both honour the same
+        confirmation gate — a button that skipped "are you sure?" would be a quiet
+        way to bypass it.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to reply.
+            intent: The intent that ran.
+            result: Its outcome.
+        """
         if result.status is CommandStatus.REQUIRES_CONFIRMATION and result.confirmation_token:
             key = f"c{len(self._pending)}{intent.intent.value[:8]}"[:60]
             self._pending[key] = (intent, result.confirmation_token)
@@ -558,6 +620,67 @@ class TelegramBridge:
         await self._send(client, chat_id, result.message)
         await self._maybe_send_image(client, chat_id, intent, result)
         await self._maybe_send_document(client, chat_id, intent, result)
+
+    async def _send_menu(self, client: httpx.AsyncClient, chat_id: int) -> None:
+        """Send the quick-action button menu.
+
+        The things reached for daily — a screenshot, a lock, pause — one tap away,
+        so the common case needs no typing. Typing still works for everything else.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to send.
+        """
+        keyboard = [
+            [{"text": label, "callback_data": f"do:{action}"} for label, action in row]
+            for row in _MENU_LAYOUT
+        ]
+        await client.post(
+            f"{self._url()}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": "⚡ <b>Quick actions</b>\nTap one — or just type a request.",
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": keyboard},
+            },
+        )
+
+    async def _handle_menu_action(
+        self, client: httpx.AsyncClient, chat_id: int, action: str
+    ) -> None:
+        """Run a quick-action button.
+
+        Reports (status, Wi-Fi) render text directly; the rest run a one-shot intent
+        through the ordinary executor, so their confirmation policy still applies.
+
+        Args:
+            client: HTTP client.
+            chat_id: Where to reply.
+            action: The action key from the button.
+        """
+        if action == "status":
+            await self._send(client, chat_id, await self._status_report(), parse_mode="HTML")
+            return
+        if action == "wifi":
+            state = self._commands.context.desktop.wifi_status()
+            await self._send(client, chat_id, f"📶 {_esc(state)}", parse_mode="HTML")
+            return
+
+        spec = _MENU_ACTION_INTENTS.get(action)
+        if spec is None:
+            await self._send(client, chat_id, "That action is no longer available.")
+            return
+        intent_type, target = spec
+        intent = Intent(
+            intent=intent_type,
+            target=target,
+            confidence=1.0,
+            reasoning="Quick-action button.",
+            requires_confirmation=False,
+            utterance=f"/menu {action}",
+        )
+        result = await self._commands.execute(intent)
+        await self._deliver(client, chat_id, intent, result)
 
     @contextlib.asynccontextmanager
     async def _typing(self, client: httpx.AsyncClient, chat_id: int) -> AsyncIterator[None]:
@@ -771,6 +894,10 @@ class TelegramBridge:
                 f"{self._url()}/answerCallbackQuery",
                 json={"callback_query_id": update.callback_id},
             )
+
+        if data.startswith("do:"):
+            await self._handle_menu_action(client, update.chat_id, data[3:])
+            return
 
         if data.startswith("no:"):
             self._pending.pop(data[3:], None)
@@ -1156,6 +1283,7 @@ _WELCOME = (
     "• <code>take a screenshot</code>\n"
     "• <code>send me my latest download</code>\n\n"
     "Anything risky asks first, with <b>Yes</b> / <b>No</b> buttons.\n\n"
+    "<b>/menu</b> — quick-action buttons\n"
     "<b>/help</b> — everything I can do\n"
     "<b>/status</b> — a live snapshot of this machine"
 )
@@ -1201,7 +1329,7 @@ _HELP = (
     "• <code>read this PDF and…</code>\n\n"
     "⚡ <b>Power</b>\n"
     "• <code>sleep</code> · <code>shut down</code> · <code>restart</code>\n\n"
-    "<b>/status</b> — a live snapshot of this machine\n\n"
+    "<b>/menu</b> — quick-action buttons · <b>/status</b> — a live snapshot\n\n"
     "Anything risky asks first, with <b>Yes</b> / <b>No</b> buttons. A few things "
     "stay on this machine for privacy: clipboard, screen reading, documents."
 )

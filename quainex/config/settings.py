@@ -326,6 +326,14 @@ class Settings(BaseSettings):
     # inbound files entirely.
     telegram_receive_files: bool = True
 
+    # Send a short "online" ping to the allowed users when the bridge starts.
+    #
+    # On by default: the whole reason to run over Telegram is that the machine is
+    # somewhere you are not, so knowing it has just come back — after a reboot, a
+    # crash, or a manual restart — is worth one message. It is a heartbeat, not
+    # chatter: exactly one line, only at startup. Set false to silence it.
+    telegram_startup_ping: bool = True
+
     # --- Plugins (Phase 9) ------------------------------------------------
     # Where plugins are looked for. Relative paths resolve to the repo root.
     plugin_dir: Path = Path("plugins_installed")

@@ -216,6 +216,11 @@ async def test_a_conflict_stops_the_loop_instead_of_retrying_forever(tmp_path, m
             response = httpx.Response(409, request=request, text="Conflict")
             raise httpx.HTTPStatusError("conflict", request=request, response=response)
 
+        async def post(self, url: str, **_: object) -> _OkResponse:
+            # Startup registers a command menu and sends an "online" ping before
+            # polling; both post, and both are best-effort.
+            return _OkResponse()
+
     client = ConflictClient()
     monkeypatch.setattr("quainex.integrations.telegram.httpx.AsyncClient", lambda **_: client)
 
@@ -814,3 +819,95 @@ async def test_a_file_too_big_to_download_is_reported_not_attempted(tmp_path):
 
     assert not any(c[0] == "save_incoming_file" for c in desktop.calls)
     assert any("MB" in message for message in client.sent)
+
+
+# -- quick-action menu and the startup heartbeat ---------------------------
+
+
+class MenuClient(SendRecorder):
+    """Records outbound posts, including the inline keyboard of a menu."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.keyboards: list[object] = []
+
+    async def post(self, url: str, **kwargs: object) -> object:
+        json_body = kwargs.get("json")
+        if isinstance(json_body, dict) and "reply_markup" in json_body:
+            self.keyboards.append(json_body["reply_markup"])
+        return await super().post(url, **kwargs)
+
+
+def _button_update(data: str) -> object:
+    return _parse_update(
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb1",
+                "from": {"id": ALLOWED_USER},
+                "data": data,
+                "message": {"chat": {"id": 7}},
+            },
+        }
+    )
+
+
+async def test_menu_sends_tappable_quick_actions(tmp_path):
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    client = MenuClient()
+
+    await bridge._send_menu(client, 7)  # type: ignore[arg-type]
+
+    assert client.keyboards, "the menu must carry an inline keyboard"
+    # Every button carries a "do:" action.
+    buttons = [b for row in client.keyboards[0]["inline_keyboard"] for b in row]  # type: ignore[index]
+    assert all(b["callback_data"].startswith("do:") for b in buttons)
+    assert any(b["callback_data"] == "do:screenshot" for b in buttons)
+
+
+async def test_a_menu_button_runs_the_action(tmp_path):
+    """Tapping ⏯ Pause runs the media intent through the ordinary executor."""
+    desktop = FakeDesktopController()
+    bridge = _bridge(
+        tmp_path,
+        desktop=desktop,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+    )
+    client = MenuClient()
+
+    await bridge._dispatch(client, _button_update("do:pause"))  # type: ignore[arg-type]
+
+    assert any(c == ("media_control", "pause") for c in desktop.calls)
+
+
+async def test_a_status_menu_button_reports_without_an_intent(tmp_path):
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    client = MenuClient()
+
+    await bridge._dispatch(client, _button_update("do:status"))  # type: ignore[arg-type]
+
+    assert any("CPU" in message for message in client.sent)
+
+
+async def test_the_startup_ping_greets_the_allowed_user(tmp_path):
+    bridge = _bridge(tmp_path, telegram_bot_token="123:abc", telegram_allowed_users=[ALLOWED_USER])
+    client = SendRecorder()
+
+    await bridge._announce_online(client)  # type: ignore[arg-type]
+
+    assert any("online" in message.lower() for message in client.sent)
+
+
+async def test_the_startup_ping_can_be_silenced(tmp_path):
+    bridge = _bridge(
+        tmp_path,
+        telegram_bot_token="123:abc",
+        telegram_allowed_users=[ALLOWED_USER],
+        telegram_startup_ping=False,
+    )
+    client = SendRecorder()
+
+    await bridge._announce_online(client)  # type: ignore[arg-type]
+
+    assert client.sent == []
