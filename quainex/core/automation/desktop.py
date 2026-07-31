@@ -193,6 +193,10 @@ class DesktopController(Protocol):
         """Replace the clipboard contents."""
         ...
 
+    def type_text(self, text: str) -> str:
+        """Type text into the focused window, as if from the keyboard."""
+        ...
+
     def notify(self, message: str, title: str) -> str:
         """Show a desktop notification."""
         ...

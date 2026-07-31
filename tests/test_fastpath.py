@@ -408,7 +408,10 @@ def test_send_file_is_local(said: str, target: str):
         ("scroll down", IntentType.BROWSER_SCROLL, "down"),
         ("scroll to bottom", IntentType.BROWSER_SCROLL, "bottom"),
         ("click the login button", IntentType.BROWSER_CLICK, "login button"),
-        ("type hello world", IntentType.BROWSER_TYPE, "hello world"),
+        # Browser typing must be qualified now; bare "type X" goes to the active
+        # window (see the phone-to-PC tests), so the browser needs an explicit word.
+        ("type my search in the browser", IntentType.BROWSER_TYPE, "my search"),
+        ("enter hello in the page", IntentType.BROWSER_TYPE, "hello"),
     ],
 )
 def test_browser_control_is_local(said: str, intent: IntentType, target: str):
@@ -504,3 +507,44 @@ def test_a_bare_verb_with_no_target_falls_through():
     """A bare verb is a request for clarification, not a command."""
     assert classify_locally("open") is None
     assert classify_locally("close") is None
+
+
+# -- content-bearing commands: payload preserved verbatim -----------------
+
+
+def test_copy_to_pc_becomes_set_clipboard_with_exact_text():
+    result = classify_locally("copy this to my PC: Hello, World!")
+    assert result is not None
+    assert result.intent is IntentType.SET_CLIPBOARD
+    # Case and punctuation survive — the whole point is an exact copy.
+    assert result.target == "Hello, World!"
+
+
+def test_type_command_keeps_case_and_punctuation():
+    result = classify_locally("type Buy milk & eggs.")
+    assert result is not None
+    assert result.intent is IntentType.TYPE_TEXT
+    assert result.target == "Buy milk & eggs."
+
+
+def test_typed_text_may_exceed_the_normal_word_limit():
+    body = " ".join(["word"] * 30)
+    result = classify_locally(f"type {body}")
+    assert result is not None
+    assert result.intent is IntentType.TYPE_TEXT
+    assert result.target == body
+
+
+def test_download_captures_the_url_and_optional_location():
+    result = classify_locally("download https://example.com/a.zip to downloads")
+    assert result is not None
+    assert result.intent is IntentType.DOWNLOAD_URL
+    assert result.target == "https://example.com/a.zip"
+    assert any(p.key == "location" and p.value == "downloads" for p in result.parameters)
+
+
+def test_download_without_a_location_carries_no_location():
+    result = classify_locally("download https://example.com/a.zip")
+    assert result is not None
+    assert result.intent is IntentType.DOWNLOAD_URL
+    assert result.parameters == []

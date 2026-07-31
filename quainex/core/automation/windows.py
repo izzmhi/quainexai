@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import time
 import webbrowser
+from ctypes import wintypes
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -180,6 +181,81 @@ class _GUID(ctypes.Structure):
         """
         super().__init__()
         ctypes.windll.ole32.CLSIDFromString(guid, ctypes.byref(self))
+
+
+#: Flags and codes for ``SendInput`` keyboard events.
+_INPUT_KEYBOARD = 1
+_KEYEVENTF_KEYUP = 0x0002
+_KEYEVENTF_UNICODE = 0x0004
+_VK_RETURN = 0x0D
+_VK_TAB = 0x09
+
+
+class _MOUSEINPUT(ctypes.Structure):
+    """The mouse arm of the ``INPUT`` union — defined only so the union sizes right."""
+
+    _fields_ = (
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    )
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    """The keyboard arm of the ``INPUT`` union."""
+
+    _fields_ = (
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    )
+
+
+class _HARDWAREINPUT(ctypes.Structure):
+    """The hardware arm of the ``INPUT`` union — present for correct sizing."""
+
+    _fields_ = (
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    )
+
+
+class _INPUTUNION(ctypes.Union):
+    """The tagged payload of ``INPUT``."""
+
+    _fields_ = (("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT))
+
+
+class _INPUT(ctypes.Structure):
+    """A Windows ``INPUT`` record for ``SendInput``.
+
+    The whole union is defined, not just the keyboard arm, because Windows checks
+    the reported size against ``sizeof(INPUT)`` and rejects the call if a truncated
+    struct makes it too small.
+    """
+
+    _fields_ = (("type", wintypes.DWORD), ("union", _INPUTUNION))
+
+
+def _key_event(*, scan: int = 0, vk: int = 0, flags: int = 0) -> _INPUT:
+    """Build one keyboard ``INPUT`` record.
+
+    Args:
+        scan: The scan code — a UTF-16 code unit for Unicode events.
+        vk: A virtual-key code, for keys sent by code rather than character.
+        flags: ``SendInput`` key flags.
+
+    Returns:
+        The populated record.
+    """
+    key = _KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=flags, time=0, dwExtraInfo=None)
+    return _INPUT(type=_INPUT_KEYBOARD, union=_INPUTUNION(ki=key))
 
 
 def resolve_known_folder(name: str) -> Path | None:
@@ -1316,6 +1392,62 @@ class WindowsDesktopController:
 
         _log.info("clipboard_written", characters=len(text))
         return "Copied to the clipboard."
+
+    def type_text(self, text: str) -> str:
+        """Type text into the focused window, as if from the keyboard.
+
+        Sends each character as a Unicode keystroke via ``SendInput``, so it lands
+        in whatever has focus — an editor, a search box, a chat — without touching
+        the clipboard. Text is encoded as UTF-16 units, so accented letters and
+        emoji type correctly; a newline in the text presses Enter and a tab presses
+        Tab, honouring the shape of what was sent.
+
+        It does **not** press Enter at the end. Typing into a focused terminal is
+        genuinely powerful, and stopping short of a final Enter means the text is
+        *entered*, never *submitted*, unless the sender put a newline there
+        themselves — the machine's owner stays the one who commits.
+
+        Args:
+            text: The text to type.
+
+        Returns:
+            A short confirmation.
+
+        Raises:
+            CommandNotAllowedError: There is nothing to type.
+            CommandExecutionError: Windows blocked the input (a secure desktop).
+        """
+        if not text.strip():
+            raise CommandNotAllowedError("There is nothing to type.")
+
+        events: list[_INPUT] = []
+        for char in text:
+            if char in "\r\n":
+                events.append(_key_event(vk=_VK_RETURN))
+                events.append(_key_event(vk=_VK_RETURN, flags=_KEYEVENTF_KEYUP))
+                continue
+            if char == "\t":
+                events.append(_key_event(vk=_VK_TAB))
+                events.append(_key_event(vk=_VK_TAB, flags=_KEYEVENTF_KEYUP))
+                continue
+            data = char.encode("utf-16-le")
+            for index in range(0, len(data), 2):
+                scan = int.from_bytes(data[index : index + 2], "little")
+                events.append(_key_event(scan=scan, flags=_KEYEVENTF_UNICODE))
+                events.append(
+                    _key_event(scan=scan, flags=_KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP)
+                )
+
+        array = (_INPUT * len(events))(*events)
+        sent = ctypes.windll.user32.SendInput(len(events), array, ctypes.sizeof(_INPUT))
+        if sent != len(events):
+            raise CommandExecutionError(
+                "Windows blocked the keystrokes — the focused window may be running as "
+                "administrator, or a lock screen is up."
+            )
+
+        _log.info("typed_text", characters=len(text))
+        return f"Typed {len(text)} character(s) into the active window."
 
     def notify(self, message: str, title: str) -> str:
         """Show a desktop balloon notification.

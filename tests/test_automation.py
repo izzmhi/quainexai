@@ -207,6 +207,29 @@ def test_an_empty_or_dotted_name_falls_back(controller):
     assert _safe_filename("...").startswith("file-")
 
 
+def test_type_text_sends_two_keystrokes_per_character(controller, monkeypatch):
+    """Each character is a key-down and a key-up, sent via one SendInput call."""
+    import ctypes
+
+    captured: dict[str, int] = {}
+
+    def fake_send_input(count, _array, _size):
+        captured["count"] = count
+        return count  # all events accepted
+
+    monkeypatch.setattr(ctypes.windll.user32, "SendInput", fake_send_input)
+
+    message = controller.type_text("Hi")
+
+    assert captured["count"] == 4  # two characters, each a down and an up
+    assert "2 character" in message
+
+
+def test_typing_nothing_is_refused(controller):
+    with pytest.raises(CommandNotAllowedError, match="nothing to type"):
+        controller.type_text("   ")
+
+
 def test_an_application_not_installed_anywhere_is_reported_clearly(controller):
     """Open-any-app changed this from a refusal to a not-found.
 

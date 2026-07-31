@@ -23,9 +23,10 @@ Future improvements:
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import httpx
 
@@ -54,6 +55,70 @@ _MAX_ANSWER_CHARS = 600
 #: is coarse — city-level, from the IP — which is exactly right for "roughly where
 #: is my laptop" and honest about not being GPS.
 _IP_LOOKUP = "http://ip-api.com/json/"
+
+#: Ceiling on a URL download. Fetching a link the owner named is fine; fetching an
+#: unbounded stream onto their disk is not, so the transfer is capped and streamed
+#: rather than read whole into memory first.
+_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _download_filename(url: str, headers: httpx.Headers) -> str:
+    """Choose a file name for a download, preferring what the server suggests.
+
+    Args:
+        url: The URL fetched.
+        headers: The response headers.
+
+    Returns:
+        A candidate name (the controller sanitises it before it touches disk).
+    """
+    disposition = headers.get("content-disposition", "")
+    if match := re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", disposition, re.IGNORECASE):
+        return match.group(1).strip()
+    name = urlparse(url).path.rsplit("/", 1)[-1]
+    return name or "download"
+
+
+async def _download_url(url: str) -> tuple[bytes, str]:
+    """Fetch an http(s) URL, capped and streamed, onto the machine.
+
+    Args:
+        url: The link to fetch.
+
+    Returns:
+        The bytes and a suggested file name.
+
+    Raises:
+        CommandNotAllowedError: The scheme is not http(s), or the URL has no host.
+        CommandExecutionError: The transfer failed or exceeded the size cap.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise CommandNotAllowedError(
+            "I can only download http(s) links. Send a full web address."
+        )
+
+    try:
+        async with (
+            httpx.AsyncClient(timeout=30, follow_redirects=True) as client,
+            client.stream("GET", url) as response,
+        ):
+            response.raise_for_status()
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > _MAX_DOWNLOAD_BYTES:
+                    raise CommandExecutionError(
+                        f"That download is over the "
+                        f"{_MAX_DOWNLOAD_BYTES // 1024 // 1024} MB limit."
+                    )
+                chunks.append(chunk)
+            name = _download_filename(url, response.headers)
+    except httpx.HTTPError as exc:
+        raise CommandExecutionError(f"Could not download {url}: {exc}") from exc
+
+    return b"".join(chunks), name
 
 
 async def _public_ip_location() -> str:
@@ -376,6 +441,25 @@ def build_commands(settings: Settings) -> list[Command]:
         contents = ctx.desktop.read_clipboard()
         return CommandOutcome(message=contents, data={"text": contents})
 
+    async def set_clipboard(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.write_clipboard(_target(intent)))
+
+    async def type_text(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        return CommandOutcome(message=ctx.desktop.type_text(_target(intent)))
+
+    async def download_url(ctx: CommandContext, intent: Intent) -> CommandOutcome:
+        location = intent.parameters_as_dict().get("location")
+        data, name = await _download_url(_target(intent))
+        saved = ctx.desktop.save_incoming_file(
+            data, suggested_name=name, location=location
+        )
+        size = len(data)
+        readable = f"{size / 1024:.0f} KB" if size >= 1024 else f"{size} bytes"
+        return CommandOutcome(
+            message=f"⬇️ Saved {saved.name} ({readable})\n{saved}",
+            data={"path": str(saved)},
+        )
+
     async def notify(ctx: CommandContext, intent: Intent) -> CommandOutcome:
         return CommandOutcome(message=ctx.desktop.notify(_target(intent), title="Quainex"))
 
@@ -643,6 +727,24 @@ def build_commands(settings: Settings) -> list[Command]:
             intent=IntentType.CLIPBOARD,
             summary="Read or write the clipboard.",
             handler=clipboard,
+        ),
+        Command(
+            intent=IntentType.SET_CLIPBOARD,
+            summary="Copy text to this machine's clipboard from the phone.",
+            handler=set_clipboard,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.TYPE_TEXT,
+            summary="Type text into the active window.",
+            handler=type_text,
+            requires_target=True,
+        ),
+        Command(
+            intent=IntentType.DOWNLOAD_URL,
+            summary="Download a file from a link onto this machine.",
+            handler=download_url,
+            requires_target=True,
         ),
         Command(
             intent=IntentType.NOTIFY,

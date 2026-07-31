@@ -220,6 +220,37 @@ _FOLDER_PATTERN = re.compile(
     r"^(?:open|show|go to) (?:my |the )?(?P<target>[\w\s-]+?)(?: folder| directory)?$"
 )
 
+#: Content-bearing commands are matched against the *original* utterance, not the
+#: normalised one: the whole payload is the text to copy, type, or the URL to
+#: fetch, so lower-casing it, stripping its punctuation, or rejecting it for being
+#: over the word limit would all corrupt the thing being carried. IGNORECASE lets
+#: the verb be capitalised; DOTALL lets the content span lines. The target group is
+#: taken verbatim.
+_SET_CLIPBOARD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^(?:copy|paste)\s+(?:this|that|the following)?\s*(?:onto|into|on|to)?\s*"
+        r"(?:my\s+)?(?:pc|computer|laptop|clipboard)\s*[:\-]?\s*(?P<target>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"^(?:set|change)\s+(?:my\s+)?clipboard\s+(?:contents\s+)?to\s*[:\-]?\s*(?P<target>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+_TYPE_TEXT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^type\s+(?:this|the following|out)?\s*"
+        r"(?:(?:into|in)\s+(?:the\s+)?(?:active|focused|current)\s+window)?\s*"
+        r"[:\-]?\s*(?P<target>.+)$",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+_DOWNLOAD_URL_PATTERN = re.compile(
+    r"^(?:download|fetch|grab|save)\s+(?:this\s+|the\s+)?(?:link\s+|url\s+|file\s+)?"
+    r"(?P<url>https?://\S+)(?:\s+(?:to|into|in|onto)\s+(?P<location>.+))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+
 #: File search. Distinct from opening, and the target is a query rather than a name.
 _SEARCH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?:find|search for|look for) (?:my |the )?(?P<target>.+)$"),
@@ -347,7 +378,15 @@ _BROWSER_SCROLL_PATTERNS: tuple[re.Pattern[str], ...] = (
 #: clearly if none is. "back"/"previous" alone are media controls, so browser-back
 #: needs the explicit "go back" / "page" phrasing.
 _BROWSER_CLICK_PATTERN = re.compile(r"^(?:click|tap)(?: on)? (?:the )?(?P<target>.+)$")
-_BROWSER_TYPE_PATTERN = re.compile(r"^(?:type|enter)(?: in)? (?P<target>.+)$")
+#: Browser typing must be qualified — "type X in the browser/page/search box" —
+#: because a bare "type X" now types into the active desktop window (TYPE_TEXT). The
+#: qualifier is what separates "type into the invisible browser" from "type into
+#: what I'm looking at".
+_BROWSER_TYPE_PATTERN = re.compile(
+    r"^(?:type|enter)\s+(?P<target>.+?)\s+(?:in|into)\s+(?:the\s+)?"
+    r"(?:browser|page|website|search(?:\s*box)?|address\s*bar|url\s*bar|text\s*box)$",
+    re.IGNORECASE | re.DOTALL,
+)
 _BROWSER_BACK_PATTERN = re.compile(r"^(?:go back|browser back|previous page|back a page)$")
 _BROWSER_CLOSE_PATTERN = re.compile(r"^close (?:the )?browser$")
 
@@ -397,6 +436,12 @@ def classify_locally(utterance: str) -> IntentClassification | None:
         A classification when the utterance matches a built-in pattern
         unambiguously, otherwise ``None`` so the caller falls back to the model.
     """
+    # Content-bearing commands first, against the raw utterance: their payload must
+    # survive verbatim, and it routinely runs past the word limit that guards the
+    # normalised patterns below.
+    if (carried := _classify_carried_content(utterance.strip())) is not None:
+        return carried
+
     text = _normalise(utterance)
     if not text or len(text.split()) > _MAX_WORDS:
         return None
@@ -478,8 +523,8 @@ def classify_locally(utterance: str) -> IntentClassification | None:
             return _classification(IntentType.BROWSE, match.group("target").strip())
     if match := _BROWSER_CLICK_PATTERN.match(text):
         return _classification(IntentType.BROWSER_CLICK, match.group("target").strip())
-    if match := _BROWSER_TYPE_PATTERN.match(text):
-        return _classification(IntentType.BROWSER_TYPE, match.group("target").strip())
+    # Browser typing is handled earlier, in _classify_carried_content, so its target
+    # keeps its original case and a bare "type X" can reach the active-window path.
 
     # Before the application patterns, which would otherwise claim
     # "open github.com" as an application named "github.com".
@@ -514,6 +559,42 @@ def classify_locally(utterance: str) -> IntentClassification | None:
                 return _classification(intent, target)
             # A structured phrase: fall through to the model rather than guessing.
             return None
+
+    return None
+
+
+def _classify_carried_content(raw: str) -> IntentClassification | None:
+    """Classify the commands whose payload must be preserved exactly.
+
+    Matched against the original text so case, punctuation and length are kept:
+    "copy … to my PC", "type …", and "download <url> [to <place>]".
+
+    Args:
+        raw: The original utterance, stripped of surrounding whitespace.
+
+    Returns:
+        A classification with the verbatim payload, or ``None``.
+    """
+    if not raw:
+        return None
+
+    for pattern in _SET_CLIPBOARD_PATTERNS:
+        if match := pattern.match(raw):
+            return _classification(IntentType.SET_CLIPBOARD, match.group("target").strip())
+
+    # Browser typing is checked before active-window typing so the qualifier wins:
+    # "type X in the browser" is browser input, bare "type X" is the active window.
+    if match := _BROWSER_TYPE_PATTERN.match(raw):
+        return _classification(IntentType.BROWSER_TYPE, match.group("target").strip())
+
+    for pattern in _TYPE_TEXT_PATTERNS:
+        if match := pattern.match(raw):
+            return _classification(IntentType.TYPE_TEXT, match.group("target").strip())
+
+    if match := _DOWNLOAD_URL_PATTERN.match(raw):
+        location = (match.group("location") or "").strip()
+        parameters = [IntentParameter(key="location", value=location)] if location else None
+        return _classification(IntentType.DOWNLOAD_URL, match.group("url").strip(), parameters)
 
     return None
 

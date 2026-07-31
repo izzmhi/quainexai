@@ -77,6 +77,9 @@ class IntentType(StrEnum):
     SCREENSHOT = "screenshot"
     WEBCAM = "webcam"
     CLIPBOARD = "clipboard"
+    SET_CLIPBOARD = "set_clipboard"
+    TYPE_TEXT = "type_text"
+    DOWNLOAD_URL = "download_url"
     NOTIFY = "notify"
     SYSTEM_INFO = "system_info"
     WEB_SEARCH = "web_search"
@@ -174,6 +177,21 @@ INTENT_DESCRIPTIONS: dict[IntentType, str] = {
     ),
     IntentType.CLIPBOARD: (
         "Read or write the clipboard. parameters may carry action=read|write and text=..."
+    ),
+    IntentType.SET_CLIPBOARD: (
+        "Put text onto the machine's clipboard from the phone. Use for 'copy this to "
+        "my PC', 'set my clipboard to ...', 'paste this on my computer'. target = the "
+        "text to copy. This only writes; it never reads the clipboard."
+    ),
+    IntentType.TYPE_TEXT: (
+        "Type text into whatever window is focused on the machine, as if from the "
+        "keyboard. Use for 'type ...', 'type this for me', 'write ... into the active "
+        "window'. target = the text to type. Does not press Enter."
+    ),
+    IntentType.DOWNLOAD_URL: (
+        "Download a file from a web link straight onto the machine. Use for 'download "
+        "this link', 'save this url to downloads'. target = the http(s) URL. An "
+        "optional destination folder goes in parameters as key 'location'."
     ),
     IntentType.NOTIFY: "Show a desktop notification. target = the message.",
     IntentType.SYSTEM_INFO: "Report system status such as CPU, memory or battery. No target.",

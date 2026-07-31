@@ -148,6 +148,9 @@ class FakeDesktopController:
     def write_clipboard(self, text: str) -> str:
         return self._record("write_clipboard", text)
 
+    def type_text(self, text: str) -> str:
+        return self._record("type_text", text)
+
     def notify(self, message: str, title: str) -> str:
         return self._record("notify", (title, message))
 
@@ -885,3 +888,49 @@ def test_common_commands_work_with_no_api_key_at_all(client: TestClient):
     body = response.json()
     assert body["intent"]["intent"] == "screenshot"
     assert body["result"]["status"] == "succeeded"
+
+
+# -- phone-to-PC input: clipboard, typing, URL download -------------------
+
+
+async def test_set_clipboard_writes_the_text(tmp_path):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.SET_CLIPBOARD, target="paste me")
+    )
+    assert result.ok
+    assert ("write_clipboard", "paste me") in desktop.calls
+
+
+async def test_type_text_types_into_the_active_window(tmp_path):
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.TYPE_TEXT, target="Hello, World!")
+    )
+    assert result.ok
+    assert ("type_text", "Hello, World!") in desktop.calls
+
+
+async def test_download_url_fetches_then_saves(tmp_path, monkeypatch):
+    async def fake_download(url: str):
+        assert url == "https://example.com/a.zip"
+        return b"payload", "a.zip"
+
+    monkeypatch.setattr("quainex.core.commands.builtin._download_url", fake_download)
+    desktop = FakeDesktopController()
+    result = await build_executor(desktop, _settings(tmp_path)).execute(
+        _intent(IntentType.DOWNLOAD_URL, target="https://example.com/a.zip")
+    )
+    assert result.ok
+    saves = [c for c in desktop.calls if c[0] == "save_incoming_file"]
+    assert saves, "the fetched bytes should be handed to the file saver"
+    suggested_name, _location, size = saves[0][1]
+    assert suggested_name == "a.zip"
+    assert size == len(b"payload")
+
+
+async def test_download_refuses_non_http_urls():
+    from quainex.core.commands.builtin import _download_url
+
+    with pytest.raises(CommandNotAllowedError, match="http"):
+        await _download_url("file:///C:/Windows/System32/config/SAM")
